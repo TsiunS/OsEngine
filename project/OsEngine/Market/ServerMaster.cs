@@ -58,6 +58,7 @@ using OsEngine.Market.Servers.MoexAlgopack;
 using OsEngine.Market.Servers.HTX.Spot;
 using OsEngine.Market.Servers.HTX.Futures;
 using OsEngine.Market.Servers.HTX.Swap;
+using OsEngine.Market.Servers.FixFastCurrency;
 
 namespace OsEngine.Market
 {
@@ -201,7 +202,8 @@ namespace OsEngine.Market
                 serverTypes.Add(ServerType.InteractiveBrokers);
                 serverTypes.Add(ServerType.NinjaTrader);
                 serverTypes.Add(ServerType.Lmax);
-                
+                serverTypes.Add(ServerType.FixFastCurrency);
+
 
                 serverTypes.Add(ServerType.AstsBridge);
 
@@ -551,6 +553,10 @@ namespace OsEngine.Market
                 else if (type == ServerType.HTXSwap)
                 {
                     newServer = new HTXSwapServer();
+                }
+                else if (type == ServerType.FixFastCurrency)
+                {
+                    newServer = new FixFastCurrencyServer();
                 }
 
                 if (newServer == null)
@@ -1106,6 +1112,10 @@ namespace OsEngine.Market
                 {
                     serverPermission = new HTXSwapServerPermission();
                 }
+                else if (type == ServerType.FixFastCurrency)
+                {
+                    serverPermission = new FixFastCurrencyServerPermission();
+                }
 
                 if (serverPermission != null)
                 {
@@ -1526,5 +1536,7 @@ namespace OsEngine.Market
         /// HTXSwap exchange
         /// </summary>
         HTXSwap,
+
+        FixFastCurrency,
     }
 }
