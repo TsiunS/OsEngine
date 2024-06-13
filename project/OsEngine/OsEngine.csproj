@@ -600,6 +600,7 @@
       <DependentUpon>FinamServerUi.xaml</DependentUpon>
     </Compile>
     <Compile Include="Market\Servers\FixFastCurrency\FAST\FastConnection.cs" />
+    <Compile Include="Market\Servers\FixFastCurrency\FAST\TradesSnapshot.cs" />
     <Compile Include="Market\Servers\FixFastCurrency\FIX\RejectMessage.cs" />
     <Compile Include="Market\Servers\FixFastCurrency\FixFastCurrencyServer.cs" />
     <Compile Include="Market\Servers\FixFastCurrency\FixFastCurrencyServerPermission.cs" />
