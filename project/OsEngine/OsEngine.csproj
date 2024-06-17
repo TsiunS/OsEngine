@@ -599,8 +599,10 @@
     <Compile Include="Market\Servers\Finam\FinamServerUi.xaml.cs">
       <DependentUpon>FinamServerUi.xaml</DependentUpon>
     </Compile>
+    <Compile Include="Market\Servers\FixFastCurrency\FAST\OrderChange.cs" />
     <Compile Include="Market\Servers\FixFastCurrency\FAST\FastConnection.cs" />
-    <Compile Include="Market\Servers\FixFastCurrency\FAST\TradesSnapshot.cs" />
+    <Compile Include="Market\Servers\FixFastCurrency\FAST\Snapshot.cs" />
+    <Compile Include="Market\Servers\FixFastCurrency\FAST\WaitingTrade.cs" />
     <Compile Include="Market\Servers\FixFastCurrency\FIX\RejectMessage.cs" />
     <Compile Include="Market\Servers\FixFastCurrency\FixFastCurrencyServer.cs" />
     <Compile Include="Market\Servers\FixFastCurrency\FixFastCurrencyServerPermission.cs" />
