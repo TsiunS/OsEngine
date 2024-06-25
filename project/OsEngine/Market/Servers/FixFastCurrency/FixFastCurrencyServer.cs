@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
 using System.Net.Http;
 using System.Net;
 using System.Security.Cryptography;
@@ -27,6 +26,8 @@ using OpenFAST.Template;
 using System.Xml;
 using System.Windows.Interop;
 using System.Windows;
+using System.Windows.Documents;
+using System.Linq;
 
 
 
@@ -539,61 +540,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
 
      
 
-
-        private void UpdateTrade(string message)
-        {
-
-
-            //Trade trade = new Trade();
-            //trade.SecurityNameCode = responseTrade.arg.instId;
-            //trade.Price = responseTrade.data[0][1].ToDecimal();
-            //trade.Id = responseTrade.data[0][0];
-            //trade.Time = TimeManager.GetDateTimeFromTimeStamp(Convert.ToInt64(responseTrade.data[0][0]));
-            //trade.Volume = responseTrade.data[0][2].ToDecimal();
-            //trade.Side = responseTrade.data[0][3].Equals("buy") ? Side.Buy : Side.Sell;
-
-          //  NewTradesEvent(trade);
-        }
-
-        private void UpdateDepth(string message)
-        {
-           
-
-          
-
-            MarketDepth marketDepth = new MarketDepth();
-
-            List<MarketDepthLevel> ascs = new List<MarketDepthLevel>();
-            List<MarketDepthLevel> bids = new List<MarketDepthLevel>();
-
-            //marketDepth.SecurityNameCode = responseDepth.arg.instId;
-
-            //for (int i = 0; i < responseDepth.data[0].asks.Count; i++)
-            //{
-            //    ascs.Add(new MarketDepthLevel()
-            //    {
-            //        Ask = responseDepth.data[0].asks[i][1].ToString().ToDecimal(),
-            //        Price = responseDepth.data[0].asks[i][0].ToString().ToDecimal()
-            //    });
-            //}
-
-            //for (int i = 0; i < responseDepth.data[0].bids.Count; i++)
-            //{
-            //    bids.Add(new MarketDepthLevel()
-            //    {
-            //        Bid = responseDepth.data[0].bids[i][1].ToString().ToDecimal(),
-            //        Price = responseDepth.data[0].bids[i][0].ToString().ToDecimal()
-            //    });
-            //}
-
-            marketDepth.Asks = ascs;
-            marketDepth.Bids = bids;
-
-         //   marketDepth.Time = TimeManager.GetDateTimeFromTimeStamp(Convert.ToInt64(responseDepth.data[0].ts));
-
-
-            MarketDepthEvent(marketDepth);
-        }
+      
 
         #endregion
 
@@ -623,32 +570,41 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                 return;
             }
 
-                for (int i = 0; i < _subscribledSecutiries.Count; i++)
+            string uniqueName = security.Name + security.NameClass; // название бумаги может дублироваться в разных режимах, поэтому создаем уникальное имя
+
+            for (int i = 0; i < _subscribledSecutiries.Count; i++)
+            {
+                if (_subscribledSecutiries[i].Equals(uniqueName))
                 {
-                    if (_subscribledSecutiries[i].Equals(security.Name + security.NameClass))
-                    {
-                        return;
-                    }
+                    return;
                 }
+            }
 
             if (_subscribledSecutiries.Count == 0 && _tradesIncrementalSocketA == null && _tradesIncrementalSocketB == null
                 && _ordersIncrementalSocketA == null && _ordersIncrementalSocketB == null)
             {
                 CreateSocketConnections(GetAddressesForFastStream("Trades Incremental"));
                 CreateSocketConnections(GetAddressesForFastStream("Orders Incremental"));
+                _depthChanges.Add(uniqueName, new List<OrderChange>());
             }
             if (_afterStartTrading) // если берем инструмент после начала торгов
             {
-                 CreateSocketConnections(GetAddressesForFastStream("Trades Snapshot"));
-                _tradesSnapshotsByName.Add(security.Name + security.NameClass, new Snapshot());
+                if (_ordersSnapshotSocketA == null && _ordersSnapshotSocketB == null
+                    && _tradesSnapshotSocketA == null && _tradesSnapshotSocketB == null)
+                {
+                    CreateSocketConnections(GetAddressesForFastStream("Trades Snapshot"));
+                    CreateSocketConnections(GetAddressesForFastStream("Orders Snapshot"));
+                }
 
-                CreateSocketConnections(GetAddressesForFastStream("Orders Snapshot"));
-                _ordersSnapshotsByName.Add(security.Name + security.NameClass, new Snapshot());
+                _tradesSnapshotsByName.Add(uniqueName, new Snapshot());
+                _ordersSnapshotsByName.Add(uniqueName, new Snapshot());
+                _waitingDepthChanges.Add(uniqueName, new List<OrderChange>());
+
             }
 
-            _subscribledSecutiries.Add(security.Name + security.NameClass); // название бумаги может дублироваться в разных режимах, поэтому создаем уникальное имя
+            _subscribledSecutiries.Add(uniqueName); 
 
-    
+
         }
 
         #endregion
@@ -787,7 +743,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                     }
                                 }
 
-                                string securityID = msg.GetString("Symbol");
+                                string securityID = symbol;
                                 string currency = msg.GetString("SettlCurrency");
                                 string marketCode = msg.GetString("MarketCode");
 
@@ -900,6 +856,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
         Dictionary<long, OpenFAST.Message> _tradesIncremental = new Dictionary<long, OpenFAST.Message>();
         Dictionary<long, OpenFAST.Message> _tradesSnapshotsMsgs = new Dictionary<long, OpenFAST.Message>(); // используется для проверки пропуска собщений
         Dictionary<string, Snapshot> _tradesSnapshotsByName = new Dictionary<string, Snapshot>(); // для обновления
+        Dictionary<string, List<NumbersData>> _numbersForCheckMissed = new Dictionary<string, List<NumbersData>>(); // для проверки пропука данных по RptSeq
 
         private void GetFastMessagesByTrades()
         {
@@ -977,12 +934,13 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                         long beginMsgSeqNum = 0; // начало пропущенных данных
                                         long endMsgSeqNum = 0; // конец пропущенных данных
 
-                                        bool needToRecoverDates = IsDataMissed(_tradesIncremental, out beginMsgSeqNum, out endMsgSeqNum);
+                                        //!!!!!!!!! Проверить! Ошибка в методе - длина результирующего массива
+                                        //bool needToRecoverDates = IsDataMissed(_tradesIncremental, out beginMsgSeqNum, out endMsgSeqNum);
 
-                                        if (needToRecoverDates)
-                                        {
-                                          //  WriteLog($"Требуется восстановление трейдов. Номера сообщений с {beginMsgSeqNum} по {endMsgSeqNum}", "TradesReader");
-                                        }
+                                        //if (needToRecoverDates)
+                                        //{
+                                        //  //  WriteLog($"Требуется восстановление трейдов. Номера сообщений с {beginMsgSeqNum} по {endMsgSeqNum}", "TradesReader");
+                                        //}
                                     }
 
                                     if (msg.IsDefined("GroupMDEntries"))
@@ -1006,7 +964,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                                 {
                                                     nameForCheck = name;
 
-                                                     WriteLog($" Инструмент в сообщении:{name + TradingSessionID}. Сообщение:\n\t{msg}", "В очередь");
+                                                    // WriteLog($" Инструмент в сообщении:{name + TradingSessionID}. Сообщение:\n\t{msg}", "В очередь");
                                                      _tradeMessages.Enqueue(msg);
                                                 }
 
@@ -1093,6 +1051,10 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                 string MDEntryType = groupVal.GetString("MDEntryType");
                                 int RptSeqFromTrades = groupVal.GetInt("RptSeq");
 
+                                // проверка пропуска даных по RptSeq
+
+                               // IsDataMissed()
+
                                 // храним минимальный номер обновления по инструменту
                                 if (minRptSeqFromTrades.ContainsKey(uniqueName))
                                 {
@@ -1149,10 +1111,6 @@ namespace OsEngine.Market.Servers.FixFastCurrency
 
                                         WriteLog($"Получен трейд в СИСТЕМУ: RptSeq: {RptSeqFromTrades}, Интсрумент: {trade.SecurityNameCode}, {trade.Side}, Цена: {trade.Price}, Время: {trade.Time}, Объем: {trade.Volume}", "Обработка инкрементов");
                                     }
-
- 
-
-
                          
 
                                 }
@@ -1245,14 +1203,10 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                     }
                                 }
 
-                                //if (MDEntryType == "J") // Empty Book
-                                //{
-                                //    fragment.trades.Clear();
-                                //    fragment.RptSeq = 0;
-                                //    fragment.LastFragment = true;
-                                //    fragment.RouteFirst = true;
-
-                                //}
+                                if (MDEntryType == "J") // Empty Book
+                                {
+                                    continue;
+                                }
                             }
                         }
 
@@ -1268,18 +1222,16 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                         else
                         {
                             _tradesSnapshotsByName[uniqueName].SnapshotFragments.Add(fragment);
-                            WriteLog($"Фрагмент добавлен снэпшот", "Фрагмент");
+                            WriteLog($"Фрагмент добавлен в снэпшот", "Фрагмент");
                         }
 
 
-                        // если получили последний фрагмент
-                        if (fragment.LastFragment == true)
+                      // если снэпшот сформирован
+                        if (_tradesSnapshotsByName[uniqueName].IsComletedSnapshot(_tradesSnapshotsByName[uniqueName].SnapshotFragments) == true)
                         {
-
-
-                            // если снэпшот сформирован и его RptSeq больше минимального RptSeq из инкримента, то применяем обновление
-                            if (_tradesSnapshotsByName[uniqueName].IsComletedSnapshot(_tradesSnapshotsByName[uniqueName].SnapshotFragments)
-                                && _tradesSnapshotsByName[uniqueName].RptSeq > minRptSeqFromTrades[uniqueName])
+                            // и его RptSeq больше минимального RptSeq из инкримента, то применяем обновление
+                            if (_tradesSnapshotsByName[uniqueName].RptSeq > minRptSeqFromTrades[uniqueName]
+                                || _tradesSnapshotsByName[uniqueName].RptSeq == minRptSeqFromTrades[uniqueName] - 1)
                             {
                                 WriteLog($"Снэпшот по инструменту {uniqueName} сформирован. Содержит {_tradesSnapshotsByName[uniqueName].SnapshotFragments.Count} фрагментов.", "TradeMessageReader");
 
@@ -1325,8 +1277,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
         // ОРДЕРА
         Dictionary<long, OpenFAST.Message> _ordersIncremental = new Dictionary<long, OpenFAST.Message>();
         Dictionary<long, OpenFAST.Message> _ordersSnapshotsMsgs = new Dictionary<long, OpenFAST.Message>(); // используется для проверки пропуска собщений
-        Dictionary<string, Snapshot> _ordersSnapshotsByName = new Dictionary<string, Snapshot>(); // для обновления
-       // Dictionary<string,> _depthChanges = new Dictionary<string, Snapshot>();
+      
 
         private void GetFastMessagesByOrders()
         {
@@ -1380,7 +1331,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                 string TradingSessionID = msg.GetString("TradingSessionID");
                                 string uniqueName = name + TradingSessionID;
 
-                                bool needAddMsg = IsMessageMissed(_tradesSnapshotsMsgs, msgSeqNum, msg);
+                                bool needAddMsg = IsMessageMissed(_ordersSnapshotsMsgs, msgSeqNum, msg);
 
                                 if (needAddMsg)
                                 {
@@ -1392,24 +1343,25 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                             {
 
 
-                                bool needAddMsg = IsMessageMissed(_tradesIncremental, msgSeqNum, msg);
+                                bool needAddMsg = IsMessageMissed(_ordersIncremental, msgSeqNum, msg);
 
                                 //   WriteLog($" Сообщение с номером {msgSeqNum} надо добавить: {needAddMsg} в словаре инкрементов {_tradesIncremental.Count}", "IncrementParse");
 
                                 if (needAddMsg) // если предыдущего сообщения с таким номером не было
                                 {
                                     // проверка потери данных
-                                    if (_tradesIncremental.Count > 0)
+                                    if (_ordersIncremental.Count > 0)
                                     {
                                         long beginMsgSeqNum = 0; // начало пропущенных данных
                                         long endMsgSeqNum = 0; // конец пропущенных данных
 
-                                        bool needToRecoverDates = IsDataMissed(_tradesIncremental, out beginMsgSeqNum, out endMsgSeqNum);
+                                        //!!!!!!!!!ПРОВЕРИТЬ! Ошибка - длина результирующего массива
+                                        //bool needToRecoverDates = IsDataMissed(_tradesIncremental, out beginMsgSeqNum, out endMsgSeqNum);
 
-                                        if (needToRecoverDates)
-                                        {
-                                            //  WriteLog($"Требуется восстановление трейдов. Номера сообщений с {beginMsgSeqNum} по {endMsgSeqNum}", "TradesReader");
-                                        }
+                                        //if (needToRecoverDates)
+                                        //{
+                                        //    //  WriteLog($"Требуется восстановление трейдов. Номера сообщений с {beginMsgSeqNum} по {endMsgSeqNum}", "TradesReader");
+                                        //}
                                     }
 
                                     if (msg.IsDefined("GroupMDEntries"))
@@ -1433,7 +1385,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                                 {
                                                     nameForCheck = name;
 
-                                                    WriteLogOrders($" Инструмент в сообщении:{name + TradingSessionID}. Сообщение:\n\t{msg}", "В очередь");
+                                                   // WriteLogOrders($" Инструмент в сообщении:{name + TradingSessionID}. Сообщение:\n\t{msg}", "В очередь");
                                                     _orderMessages.Enqueue(msg);
                                                 }
 
@@ -1459,24 +1411,23 @@ namespace OsEngine.Market.Servers.FixFastCurrency
             }
         }
 
+        Dictionary<string, Snapshot> _ordersSnapshotsByName = new Dictionary<string, Snapshot>(); // для обновления
+        Dictionary<string, List<OrderChange>> _depthChanges = new Dictionary<string, List<OrderChange>>();
+        Dictionary<string, List<OrderChange>> _waitingDepthChanges = new Dictionary<string, List<OrderChange>>();
+
         private void OrderMessagesReader()
         {
             Thread.Sleep(1000);
 
-
             // минимальные значения полей RptSeq(83) в накопленых ордерах по разным инструментам
-            Dictionary<string, int> minRptSeqFromTrades = new Dictionary<string, int>();
-
-            List<WaitingTrade> _waitingOrders = new List<WaitingTrade>();
-
-
-            //bool faketradesnotloaded = true;
+            Dictionary<string, int> minRptSeqFromOrders = new Dictionary<string, int>();
+            DateTime timeForDepth = DateTime.MinValue;
 
             while (true)
             {
                 try
                 {
-                    if (_tradeMessages.IsEmpty)
+                    if (_orderMessages.IsEmpty)
                     {
                         Thread.Sleep(1);
                         continue;
@@ -1515,56 +1466,88 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                 }
 
                                 string MDEntryType = groupVal.GetString("MDEntryType");
-                                int RptSeqFromTrades = groupVal.GetInt("RptSeq");
+                                int RptSeqFromOrder = groupVal.GetInt("RptSeq");
 
                                 // храним минимальный номер обновления по инструменту
-                                if (minRptSeqFromTrades.ContainsKey(uniqueName))
+                                if (minRptSeqFromOrders.ContainsKey(uniqueName))
                                 {
-                                    if (minRptSeqFromTrades[uniqueName] > RptSeqFromTrades)
+                                    if (minRptSeqFromOrders[uniqueName] > RptSeqFromOrder)
                                     {
-                                        minRptSeqFromTrades[uniqueName] = RptSeqFromTrades;
+                                        minRptSeqFromOrders[uniqueName] = RptSeqFromOrder;
                                     }
                                 }
                                 else
                                 {
-                                    minRptSeqFromTrades.Add(uniqueName, RptSeqFromTrades);
+                                    minRptSeqFromOrders.Add(uniqueName, RptSeqFromOrder);
                                 }
 
+                                OrderChange newOrderChange = new OrderChange();
 
+                                string orderType;
 
-                                if (MDEntryType == "0") // 0 - котировка на покупку, 1 - котровка на продажу
+                                switch (MDEntryType)// 0 - котировка на покупку, 1 - котровка на продажу
                                 {
-                                    string action;  
-
-                                    switch (groupVal.GetString("MDUpdateAction"))
-                                    {
-                                        case "0": action = "Добавить"; break;
-                                        case "1": action = "Изменить"; break;
-                                        case "2": action = "Удалить"; break;
-                                        default: action = "Action ERROR"; break;
-                                    }
-
-                                    decimal price = groupVal.GetString("MDEntryPx").ToDecimal();
-
-                                    string time = groupVal.GetString("MDEntryTime");
-                                    if (time.Length == 8)
-                                    {
-                                        time = "0" + time;
-                                    }
-
-                                    time = DateTime.UtcNow.ToString("ddMMyyyy") + time;
-
-                                    DateTime orderDateTime = DateTime.ParseExact(time, "ddMMyyyyHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
-
-                                   string id = groupVal.GetString("MDEntryID");
-                                  
-                                    decimal volume = groupVal.GetString("MDEntrySize").ToDecimal();
-
-                                 
-                                    WriteLogOrders($"Получен ордер: RptSeq: {RptSeqFromTrades}, Интсрумент: {uniqueName}, ID: {id}, Действие: {action}, Цена: {price}, Время: {time}, Объем: {volume}", "Обработка инкрементов orders");
-
+                                    case "0": orderType = "bid"; break;
+                                    case "1": orderType = "ask"; break;
+                                    default: orderType = "Order type ERROR"; break;
                                 }
 
+                                string action;
+
+                                switch (groupVal.GetString("MDUpdateAction"))
+                                {
+                                    case "0": action = "add"; break;
+                                    case "1": action = "change"; break;
+                                    case "2": action = "delete"; break;
+                                    default: action = "Action ERROR"; break;
+                                }
+
+                                decimal price = groupVal.GetString("MDEntryPx").ToDecimal();
+
+                                string time = groupVal.GetString("MDEntryTime");
+                                if (time.Length == 8)
+                                {
+                                    time = "0" + time;
+                                }
+
+                                time = DateTime.UtcNow.ToString("ddMMyyyy") + time;
+
+                                DateTime orderDateTime = DateTime.ParseExact(time, "ddMMyyyyHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
+
+                                string id = groupVal.GetString("MDEntryID");
+
+                                decimal volume = groupVal.GetString("MDEntrySize").ToDecimal();
+
+                                newOrderChange.UniqueName = uniqueName;
+                                newOrderChange.MDEntryID = id;
+                                newOrderChange.OrderType = orderType;
+                                newOrderChange.Price = price;
+                                newOrderChange.Action = action;
+                                newOrderChange.RptSeq = RptSeqFromOrder;
+                                newOrderChange.DateTime = orderDateTime;
+                                newOrderChange.Volume = volume;
+
+                                if (_afterStartTrading && !_ordersSnapshotsByName[uniqueName].SnapshotWasApplied)
+                                { 
+                                    // пока снэпшот не применен, изменения заявок складываем в ожидающие
+                                                                    
+                                        _waitingDepthChanges[uniqueName].Add(newOrderChange);
+
+                                    WriteLogOrders($"Получен ордер в ОЖИДАЮЩИЕ: RptSeq: {RptSeqFromOrder}, Инструмент: {uniqueName}, ID: {id}, Действие: {action}, Цена: {price}, Время: {time}, Объем: {volume}\n Ожидающих: {_waitingDepthChanges.Count}", "Обработка инкрементов orders");
+                                }
+                                else
+                                {
+                                    // обработка в реальном времени
+
+                                    _depthChanges[uniqueName].Add(newOrderChange);
+                                    WriteLogOrders($"Получен ордер в СИСТЕМУ. СТАКАН ОБНОВЛЕН: RptSeq: {RptSeqFromOrder}, Интсрумент: {uniqueName}, ID: {id}, Действие: {action}, Цена: {price}, Время: {time}, Объем: {volume}\n Ожидающих: {_waitingDepthChanges.Count}", "Обработка инкрементов orders");
+
+                                    UpdateOrderData(uniqueName, newOrderChange);
+
+                                    UpdateDepth(_depthChanges[uniqueName], name, orderDateTime);
+
+                                }
+ 
                             }
                         }
                     }
@@ -1591,6 +1574,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                         fragment.RouteFirst = RouteFirst == "1" ? true : false;
                         fragment.Symbol = name;
                         fragment.TradingSessionID = TradingSessionID;
+                        fragment.mdLevel = new List<MarketDepthLevel>();
 
                         WriteLogOrders($"Получен фрагмент снэпшота по инструменту: {uniqueName}, MsgSeqNum: {MsgSeqNum}, Первый: {fragment.RouteFirst}, Последний: {fragment.LastFragment}, RptSeq: {RptSeq}", "Обработка снэпшотов");
 
@@ -1609,76 +1593,68 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                         if (msg.IsDefined("GroupMDEntries"))
                         {
                             SequenceValue secVal = msg.GetValue("GroupMDEntries") as SequenceValue;
-                          
+
                             for (int i = 0; i < secVal.Length; i++)
                             {
                                 GroupValue groupVal = secVal[i] as GroupValue;
 
+                                OrderChange newOrderChange = new OrderChange();
+                                MarketDepthLevel level = new MarketDepthLevel();
+                         
+
                                 string MDEntryType = groupVal.GetString("MDEntryType");
+                                decimal price = groupVal.GetString("MDEntryPx").ToDecimal();
+                                string Id = groupVal.GetString("MDEntryID");
+                                decimal volume = groupVal.GetString("MDEntrySize").ToDecimal();
 
-                                string orderSide;
+                                string orderType;
 
-                                if (MDEntryType == "0") // 0 -покупка, 1-продажа
+                                switch (MDEntryType)// 0 - котировка на покупку, 1 - котровка на продажу
                                 {
-                                    MarketDepthLevel level = new MarketDepthLevel();
-
-                                    orderSide = "Bid";
-                                   decimal price = groupVal.GetString("MDEntryPx").ToDecimal();
-
-                                    string time = groupVal.GetString("MDEntryTime");
-                                    if (time.Length == 8)
-                                    {
-                                        time = "0" + time;
-                                    }
-
-                                    time = DateTime.UtcNow.ToString("ddMMyyyy") + time;
-                                    DateTime tradeDateTime = DateTime.ParseExact(time, "ddMMyyyyHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
-                                     
-                                    string Id = groupVal.GetString("MDEntryID");
-                                    decimal volume = groupVal.GetString("MDEntrySize").ToDecimal();
-                                    string ordrerStatus = groupVal.GetString("OrderStatus");
-
-                                    level.Price = price;
-                                    level.Bid = volume;
-                                    fragment.mdLevel.Add(level);
-
-                                    WriteLogOrders($"{orderSide}, price: {price}, volume: {volume}, status: {ordrerStatus}", "Fragment");
-                                }
-                                if (MDEntryType == "1") // 0 -покупка, 1-продажа
-                                {
-                                    MarketDepthLevel level = new MarketDepthLevel();
-
-                                    orderSide = "Ask";
-                                    decimal price = groupVal.GetString("MDEntryPx").ToDecimal();
-
-                                    string time = groupVal.GetString("MDEntryTime");
-                                    if (time.Length == 8)
-                                    {
-                                        time = "0" + time;
-                                    }
-
-                                    time = DateTime.UtcNow.ToString("ddMMyyyy") + time;
-                                    DateTime tradeDateTime = DateTime.ParseExact(time, "ddMMyyyyHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
-
-                                    string Id = groupVal.GetString("MDEntryID");
-                                    decimal volume = groupVal.GetString("MDEntrySize").ToDecimal();
-                                    string ordrerStatus = groupVal.GetString("OrderStatus");
-
-                                    level.Price = price;
-                                    level.Ask = volume;
-                                    fragment.mdLevel.Add(level);
-
-                                    WriteLogOrders($"{orderSide}, price: {price}, volume: {volume}, status: {ordrerStatus}", "Fragment");
+                                    case "0":
+                                        orderType = "bid";
+                                        level.Bid = volume;
+                                        level.Ask = 0;
+                                        break;
+                                    case "1":
+                                        orderType = "ask";
+                                        level.Ask = volume;
+                                        level.Bid = 0;
+                                        break;
+                                    case "J": // пустой снэпшот
+                                        continue;
+                                    default: orderType = "Order type ERROR"; break;
                                 }
 
-                                //if (MDEntryType == "J") // Empty Book
-                                //{
-                                //    fragment.trades.Clear();
-                                //    fragment.RptSeq = 0;
-                                //    fragment.LastFragment = true;
-                                //    fragment.RouteFirst = true;
+                                string time = groupVal.GetString("MDEntryTime");
+                                if (time.Length == 8)
+                                {
+                                    time = "0" + time;
+                                }
 
-                                //}
+                                time = DateTime.UtcNow.ToString("ddMMyyyy") + time;
+                                DateTime orderDateTime = DateTime.ParseExact(time, "ddMMyyyyHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
+
+                                level.Price = price;
+
+                                fragment.mdLevel.Add(level); // для первичного заполнения стакана
+
+                                newOrderChange.UniqueName = uniqueName;
+                                newOrderChange.MDEntryID = Id;
+                                newOrderChange.Price = price;
+                                newOrderChange.Volume = volume;
+                                newOrderChange.OrderType = orderType;
+                                newOrderChange.DateTime = orderDateTime;
+                                newOrderChange.Action = string.Empty;
+
+                                _depthChanges[uniqueName].Add(newOrderChange);
+
+                                timeForDepth = orderDateTime;
+
+                                //  WriteLogOrders($"{orderSide}, price: {price}, volume: {volume}, status: {ordrerStatus}", "Fragment");
+
+
+                              
                             }
                         }
 
@@ -1697,36 +1673,46 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                         }
 
 
-                        // если получили последний фрагмент
-                        if (fragment.LastFragment == true)
+                             // если снэпшот сформирован
+                        if (_ordersSnapshotsByName[uniqueName].IsComletedSnapshot(_ordersSnapshotsByName[uniqueName].SnapshotFragments) == true)
                         {
-
-
-                            // если снэпшот сформирован и его RptSeq больше минимального RptSeq из инкримента, то применяем обновление
-                            if (_ordersSnapshotsByName[uniqueName].IsComletedSnapshot(_ordersSnapshotsByName[uniqueName].SnapshotFragments)
-                                && _ordersSnapshotsByName[uniqueName].RptSeq > minRptSeqFromTrades[uniqueName])
+                            // и его RptSeq больше минимального RptSeq из инкримента, то применяем обновление
+                            if (_ordersSnapshotsByName[uniqueName].RptSeq > minRptSeqFromOrders[uniqueName]
+                                || _ordersSnapshotsByName[uniqueName].RptSeq == minRptSeqFromOrders[uniqueName] - 1)
                             {
                                 WriteLogOrders($"Снэпшот orders по инструменту {uniqueName} сформирован. Содержит {_ordersSnapshotsByName[uniqueName].SnapshotFragments.Count} фрагментов.", "OrdersMessageReader");
 
-                                //for (int i = 0; i < _ordersSnapshotsByName[uniqueName].SnapshotFragments.Count; i++)
-                                //{
-                                //    var _trades = _ordersSnapshotsByName[uniqueName].SnapshotFragments[i].trades;
+                                // формируем первый стакан из снэпшота
 
-                                //    for (int k = 0; k < _trades.Count; k++)
-                                //    {
-                                //        NewTradesEvent(_trades[k]);
-                                //    }
-                                //}
+                                MarketDepth marketDepth = new MarketDepth();
+
+                                marketDepth = MakeFirstDepth(uniqueName, _ordersSnapshotsByName);
+
+                               marketDepth.SecurityNameCode = name;
+                               marketDepth.Time = timeForDepth;
+                               MarketDepthEvent(marketDepth);
 
                                 int _RptSeqFromSnapshot = _ordersSnapshotsByName[uniqueName].RptSeq;
 
-                                //for (int j = 0; j < _waitingTrades.Count; j++)
-                                //{
-                                //    if (_waitingTrades[j].RptSeq < _RptSeqFromSnapshot)
-                                //        continue;
 
-                                //    NewTradesEvent(_waitingTrades[j].Trade);
-                                //}
+                                WriteLogOrders($"В ордерах по инструменту {uniqueName} содержится {_depthChanges[uniqueName].Count} изменений.\n---------------------------------------", "OrdersMessageReader");
+                                for (int y = 0; y < _depthChanges[uniqueName].Count; y++)
+                                {
+                                    var dat = _depthChanges[uniqueName][y];
+                                    WriteLogOrders($"Заявка {dat.MDEntryID} Price: {dat.Price}-{dat.OrderType}, Volume: {dat.Volume}, Action: {dat.Action}", "Changes");
+                                }
+
+
+                                // меняем стакан, согласно ожидающих заявок
+                                for (int j = 0; j < _waitingDepthChanges[uniqueName].Count; j++)
+                                {
+                                    if (_waitingDepthChanges[uniqueName][j].RptSeq < _RptSeqFromSnapshot)
+                                        continue;
+
+                                    UpdateOrderData(uniqueName, _waitingDepthChanges[uniqueName][j]);
+                                }
+
+                                WriteLogOrders($"Обработаны ожидающие заявки", "UpdateDepth");
 
                                 _ordersSnapshotsByName[uniqueName].SnapshotWasApplied = true;
 
@@ -1737,16 +1723,189 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                     }
 
                 }
-                catch
+                catch(Exception e)
                 {
-                    WriteLogOrders("Ошибка в потоке вторичной обработки ордеров", "TradesMessageReader");
+                    WriteLogOrders($"Ошибка в потоке вторичной обработки ордеров: {e}", "OrderMessageReader");
                 }
 
             }
 
         }
 
-       // вспомогательные методы для обработки фаст сообщений
+
+
+        // вспомогательные методы для обработки фаст сообщений
+
+        private void UpdateDepth(List<OrderChange> orderChanges, string securityName, DateTime timeDepth)
+        {
+            MarketDepth marketDepth = new MarketDepth();
+
+            List<MarketDepthLevel> asks = new List<MarketDepthLevel>();
+            List<MarketDepthLevel> bids = new List<MarketDepthLevel>();
+
+            marketDepth.SecurityNameCode = securityName;
+
+            var asksByPrice = orderChanges.FindAll(p => p.OrderType == "ask");
+            asksByPrice.Sort((x, y) => x.Price.CompareTo(y.Price));
+
+            for (int i = 1; i < asksByPrice.Count; i++)
+            {
+                if (asksByPrice[i].Price == asksByPrice[i - 1].Price)
+                {
+                    asksByPrice[i].Volume += asksByPrice[i - 1].Volume;
+                    asksByPrice.RemoveAt(i - 1);
+                }
+                   
+            }
+
+            for (int k = 0; k < asksByPrice.Count; k++)
+            {
+                 asks.Add(new MarketDepthLevel()
+                {
+                    Ask = asksByPrice[k].Volume,
+                    Price = asksByPrice[k].Price
+                });
+
+            }
+
+            var bidsByPrice = orderChanges.FindAll(p => p.OrderType == "bid");
+            bidsByPrice.Sort((y, x) => x.Price.CompareTo(y.Price));
+
+
+            for (int j = 1; j < bidsByPrice.Count; j++)
+            {
+                if (bidsByPrice[j].Price == bidsByPrice[j - 1].Price)
+                {
+                    bidsByPrice[j].Volume += bidsByPrice[j - 1].Volume;
+                    bidsByPrice.RemoveAt(j - 1);
+                }
+
+            }
+
+            for (int l = 0; l < bidsByPrice.Count; l++)
+            {
+                bids.Add(new MarketDepthLevel()
+                {
+                    Ask = bidsByPrice[l].Volume,
+                    Price = bidsByPrice[l].Price
+                });
+
+            }
+
+            marketDepth.Asks = asks;
+            marketDepth.Bids = bids;
+
+            marketDepth.Time = timeDepth;
+
+            MarketDepthEvent(marketDepth);
+        }
+
+        /// <summary>
+        /// Внести изменения в данные по заявкам, находящимся в стакане
+        /// </summary>
+        /// <param name="uniqueName">уникальное имя инструмента</param>
+        /// <param name="orderChange">новые данные для изменения заявок в стакане</param>
+        private void UpdateOrderData(string uniqueName, OrderChange orderChange)
+        {
+          var order =  _depthChanges[uniqueName].Find(p => p.MDEntryID == orderChange.MDEntryID);
+
+            if (order != null)
+            {
+                switch (orderChange.Action)
+                {
+                    case "add":
+                        WriteLogOrders($" В заявку {order.MDEntryID}-{order.OrderType} по цене: {order.Price} с объемом {order.Volume} было добавлено: {orderChange.Volume}", "UpdateDepth");
+                        order.Volume += orderChange.Volume;
+                        break;
+
+                    case "change":
+                        WriteLogOrders($" Заявка {order.MDEntryID}-{order.OrderType} по цене: {order.Price} с объемом {order.Volume} была изменена на объем: {orderChange.Volume}", "UpdateDepth");
+                        order.Volume = orderChange.Volume;
+                        break;
+
+                    case "delete":
+                        WriteLogOrders($" Заявка {order.MDEntryID}-{order.OrderType} по цене: {order.Price} с объемом {order.Volume} была удалена", "UpdateDepth");
+                        int index = _depthChanges[uniqueName].FindIndex(p => p.MDEntryID == orderChange.MDEntryID);
+                        if (index != -1)
+                            _depthChanges[uniqueName].RemoveAt(index);
+                        else
+                            SendLogMessage($"Change index for delete order not found", LogMessageType.Error);
+                        break;
+
+                    default:
+                        SendLogMessage($"Action for change order not found", LogMessageType.Error);
+                        break;
+                }
+            }
+            else
+            {
+                _depthChanges[uniqueName].Add(orderChange);
+
+                WriteLogOrders($" Новая заявка {orderChange.MDEntryID}-{orderChange.OrderType} по цене: {orderChange.Price} с объемом {orderChange.Volume} была добавлена в список", "UpdateDepth");
+            }
+        }
+
+        /// <summary>
+        /// Собрать первый стакан из снэпшота
+        /// </summary>
+        /// <param name="uniqueName"></param>
+        /// <param name="ordersSnapshotsByName"></param>
+        /// <returns></returns>
+        private MarketDepth MakeFirstDepth(string uniqueName, Dictionary<string, Snapshot> ordersSnapshotsByName)
+        {
+            MarketDepth marketDepth = new MarketDepth();
+            List<MarketDepthLevel> asks = new List<MarketDepthLevel>();
+            List<MarketDepthLevel> bids = new List<MarketDepthLevel>();
+
+            for (int i = 0; i < ordersSnapshotsByName[uniqueName].SnapshotFragments.Count; i++)
+            {
+                List<MarketDepthLevel> _mdLevels = ordersSnapshotsByName[uniqueName].SnapshotFragments[i].mdLevel;
+
+                for (int k = 0; k < _mdLevels.Count; k++)
+                {
+                    MarketDepthLevel level = new MarketDepthLevel();
+
+                    if(_mdLevels[k].Ask != 0)
+                    {
+                        MarketDepthLevel levelFromAsks =  asks.Find(a => a.Price == _mdLevels[k].Price);
+
+                        if (levelFromAsks != null) //  если в асках уже есть уровень с этой ценой, прибавляем объем
+                            levelFromAsks.Ask += _mdLevels[k].Ask;
+                        else
+                        {
+                            level.Ask = _mdLevels[k].Ask;
+                            level.Price = _mdLevels[k].Price;
+                            asks.Add(level);
+                        }
+                    }
+                    if (_mdLevels[k].Bid != 0)
+                    {
+                        MarketDepthLevel levelFromBids = bids.Find(b => b.Price == _mdLevels[k].Price);
+
+                        if (levelFromBids != null) //  если в бидах уже есть уровень с этой ценой, прибавляем объем
+                            levelFromBids.Bid += _mdLevels[k].Bid;
+                        else
+                        {
+                            level.Bid = _mdLevels[k].Bid;
+                            level.Price = _mdLevels[k].Price;
+                            bids.Add(level);
+                        }
+                    }
+                }
+            }
+
+            asks.Sort((x, y) => x.Price.CompareTo(y.Price));
+            bids.Sort((y, x) => x.Price.CompareTo(y.Price));
+
+            marketDepth.Asks = asks;
+            marketDepth.Bids = bids;
+
+            WriteLogOrders($"Первый стакан по инструменту {uniqueName} сформирован. Бидов: {bids.Count}, Асков:{asks.Count}.\n" +
+                $"[Price] [Volume]\n[{asks[0].Price}] [{asks[0].Ask}]\n----------------------\n[{bids[0].Price}] [{bids[0].Bid}]\n", "MakeFirstDepth");
+
+            return marketDepth;
+        }
+
 
         private bool IsMessageMissed(Dictionary<long, OpenFAST.Message> dictFastMsg, long msgSeqNum, OpenFAST.Message msg)
         {

@@ -10,10 +10,12 @@ namespace OsEngine.Market.Servers.FixFastCurrency.FAST
     {
         public string UniqueName { get; set; }
         public int RptSeq { get; set; }
-
-        public void Add() { }
-        public void Remove() { }
-        public void Change() { }
+        public string MDEntryID { get; set; }
+        public string Action { get; set; }
+        public string OrderType { get; set; }
+        public decimal Price { get; set; }
+        public decimal Volume { get; set; }
+        public DateTime DateTime { get; set; }
     }
 
   
