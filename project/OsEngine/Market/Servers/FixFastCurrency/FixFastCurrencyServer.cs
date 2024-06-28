@@ -379,6 +379,15 @@ namespace OsEngine.Market.Servers.FixFastCurrency
             {
                 for (int i = 0; i < connectParams.Count; i++)
                 {
+                    if (connectParams[i].FeedType == "Historical Replay")
+                    {
+                        IPAddress ipAddr = IPAddress.Parse(connectParams[i].SrsIP);
+
+                        _historicalReplayEndPoint = new IPEndPoint(ipAddr, connectParams[i].Port);
+
+                        return;
+                    }
+
                     // Create a UDP socket
                     Socket socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
                     // Configure the socket options
@@ -2059,6 +2068,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                         _historicalReplaySocket.Connect(_historicalReplayEndPoint);
 
                         // 2. Отправляем запрос на подключение к потоку восстановления
+
                         FASTHeader header = new FASTHeader();
                         header.MsgType = "A"; //Тип сообщения на установку сессии
                         header.SenderCompID = "OsEngine";
@@ -2557,10 +2567,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
         {
             CreateSocketConnections(GetAddressesForFastConnect("Historical Replay"));
 
-            IPAddress ipAddr = IPAddress.Parse(ipAddressString);
-
-            _historicalReplayEndPoint = new IPEndPoint(ipAddr, int.Parse(portString));
-
+           
         }
 
 
