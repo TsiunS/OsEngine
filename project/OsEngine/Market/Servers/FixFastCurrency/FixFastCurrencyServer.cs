@@ -28,6 +28,7 @@ using System.Windows.Interop;
 using System.Windows;
 using System.Windows.Documents;
 using System.Linq;
+using System.Diagnostics;
 
 
 
@@ -94,6 +95,10 @@ namespace OsEngine.Market.Servers.FixFastCurrency
             thread5.Name = "OrdersReaderFromQueues";
             thread5.Start();
 
+             Thread thread6 = new Thread(RecoverData);
+            thread6.Name = "HistoricalReplayMoexFixFastSpot";
+            thread6.Start();            
+
         }
 
         public DateTime ServerTime { get; set; }
@@ -154,7 +159,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
 
             LoadFASTTemplates();
 
-            List<FastConnection> _addressesInstruments = GetAddressesForFastStream("Instrument Replay");
+            List<FastConnection> _addressesInstruments = GetAddressesForFastConnect("Instrument Replay");
 
             CreateSocketConnections(_addressesInstruments);
 
@@ -280,6 +285,15 @@ namespace OsEngine.Market.Servers.FixFastCurrency
         private Socket _ordersSnapshotSocketA;
         private Socket _ordersSnapshotSocketB;
         List<Socket> _socketsOrders = new List<Socket>();
+
+        private Socket _historicalReplaySocket;
+        private IPEndPoint _historicalReplayEndPoint;
+        private long _missingOLRBeginSeqNo = -1;
+        private long _missingOLREndSeqNo = 0;
+        private bool _missingOLRData = false;
+        private long _missingTLRBeginSeqNo = -1;
+        private long _missingTLREndSeqNo = 0;
+        private bool _missingTLRData = false;
 
         #endregion
 
@@ -486,17 +500,6 @@ namespace OsEngine.Market.Servers.FixFastCurrency
 
 
 
-
-
-
-
-
-
-
-
-
-
-
         private TcpClient _client;
         private NetworkStream _stream;
         private MessageConstructor _messageConstructor;
@@ -583,8 +586,8 @@ namespace OsEngine.Market.Servers.FixFastCurrency
             if (_subscribledSecutiries.Count == 0 && _tradesIncrementalSocketA == null && _tradesIncrementalSocketB == null
                 && _ordersIncrementalSocketA == null && _ordersIncrementalSocketB == null)
             {
-                CreateSocketConnections(GetAddressesForFastStream("Trades Incremental"));
-                CreateSocketConnections(GetAddressesForFastStream("Orders Incremental"));
+                CreateSocketConnections(GetAddressesForFastConnect("Trades Incremental"));
+                CreateSocketConnections(GetAddressesForFastConnect("Orders Incremental"));
                 _depthChanges.Add(uniqueName, new List<OrderChange>());
             }
             if (_afterStartTrading) // если берем инструмент после начала торгов
@@ -592,13 +595,14 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                 if (_ordersSnapshotSocketA == null && _ordersSnapshotSocketB == null
                     && _tradesSnapshotSocketA == null && _tradesSnapshotSocketB == null)
                 {
-                    CreateSocketConnections(GetAddressesForFastStream("Trades Snapshot"));
-                    CreateSocketConnections(GetAddressesForFastStream("Orders Snapshot"));
+                    CreateSocketConnections(GetAddressesForFastConnect("Trades Snapshot"));
+                    CreateSocketConnections(GetAddressesForFastConnect("Orders Snapshot"));
                 }
 
                 _tradesSnapshotsByName.Add(uniqueName, new Snapshot());
                 _ordersSnapshotsByName.Add(uniqueName, new Snapshot());
                 _waitingDepthChanges.Add(uniqueName, new List<OrderChange>());
+                _numbersForCheckMissed.Add(uniqueName, new List<NumbersData>());
 
             }
 
@@ -1027,6 +1031,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                     }
 
                     string msgType = msg.GetString("MessageType");
+                    long msgSeqNum = msg.GetLong("MsgSeqNum");
 
                     if (msgType == "X") /// Market Data - Incremental Refresh (X)
                     {
@@ -1044,16 +1049,26 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                 string uniqueName = name + TradingSessionID;
 
                                if(!IsSubscribedToThisSecurity(uniqueName)) // если не подписаны на этот инструмент, трейд не берем
-                                {
+                               {
                                     continue;
-                                }
+                               }
 
                                 string MDEntryType = groupVal.GetString("MDEntryType");
                                 int RptSeqFromTrades = groupVal.GetInt("RptSeq");
 
                                 // проверка пропуска даных по RptSeq
 
-                               // IsDataMissed()
+                                _numbersForCheckMissed[uniqueName].Add(new NumbersData { MsgSeqNum = msgSeqNum, RptSeq = RptSeqFromTrades });
+
+                                long beginMsgSeqNum = 0; // начало пропущенных данных
+                                long endMsgSeqNum = 0; // конец пропущенных данных
+
+                                bool needToRecoverDates = IsDataMissed(_numbersForCheckMissed[uniqueName], out beginMsgSeqNum, out endMsgSeqNum);
+                             
+                                if (needToRecoverDates)
+                                {
+                                      WriteLog($"Требуется восстановление трейдов. Номера сообщений с {beginMsgSeqNum} по {endMsgSeqNum}", "TradesReader");
+                                }
 
                                 // храним минимальный номер обновления по инструменту
                                 if (minRptSeqFromTrades.ContainsKey(uniqueName))
@@ -1652,8 +1667,6 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                 timeForDepth = orderDateTime;
 
                                 //  WriteLogOrders($"{orderSide}, price: {price}, volume: {volume}, status: {ordrerStatus}", "Fragment");
-
-
                               
                             }
                         }
@@ -1676,15 +1689,15 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                              // если снэпшот сформирован
                         if (_ordersSnapshotsByName[uniqueName].IsComletedSnapshot(_ordersSnapshotsByName[uniqueName].SnapshotFragments) == true)
                         {
+                            WriteLogOrders($"Снэпшот orders по инструменту {uniqueName} сформирован. Содержит {_ordersSnapshotsByName[uniqueName].SnapshotFragments.Count} фрагментов.", "OrdersMessageReader");
                             // и его RptSeq больше минимального RptSeq из инкримента, то применяем обновление
-                            if (_ordersSnapshotsByName[uniqueName].RptSeq > minRptSeqFromOrders[uniqueName]
-                                || _ordersSnapshotsByName[uniqueName].RptSeq == minRptSeqFromOrders[uniqueName] - 1)
+                            if ( _ordersSnapshotsByName[uniqueName].RptSeq >= minRptSeqFromOrders[uniqueName])
                             {
-                                WriteLogOrders($"Снэпшот orders по инструменту {uniqueName} сформирован. Содержит {_ordersSnapshotsByName[uniqueName].SnapshotFragments.Count} фрагментов.", "OrdersMessageReader");
-
+                                WriteLogOrders($"RptSeq >= minRptSeqFromOrders[uniqueName] по инструменту {uniqueName}. Начинаю делать стакан", "OrdersSnapshot");
+ 
                                 // формируем первый стакан из снэпшота
 
-                                MarketDepth marketDepth = new MarketDepth();
+                                 MarketDepth marketDepth = new MarketDepth();
 
                                 marketDepth = MakeFirstDepth(uniqueName, _ordersSnapshotsByName);
 
@@ -1692,9 +1705,9 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                marketDepth.Time = timeForDepth;
                                MarketDepthEvent(marketDepth);
 
-                                int _RptSeqFromSnapshot = _ordersSnapshotsByName[uniqueName].RptSeq;
+                                int rptSeqFromSnapshot = _ordersSnapshotsByName[uniqueName].RptSeq;
 
-
+                                // просто для логов, из прода удалить
                                 WriteLogOrders($"В ордерах по инструменту {uniqueName} содержится {_depthChanges[uniqueName].Count} изменений.\n---------------------------------------", "OrdersMessageReader");
                                 for (int y = 0; y < _depthChanges[uniqueName].Count; y++)
                                 {
@@ -1706,7 +1719,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                                 // меняем стакан, согласно ожидающих заявок
                                 for (int j = 0; j < _waitingDepthChanges[uniqueName].Count; j++)
                                 {
-                                    if (_waitingDepthChanges[uniqueName][j].RptSeq < _RptSeqFromSnapshot)
+                                    if (_waitingDepthChanges[uniqueName][j].RptSeq < rptSeqFromSnapshot)
                                         continue;
 
                                     UpdateOrderData(uniqueName, _waitingDepthChanges[uniqueName][j]);
@@ -1929,31 +1942,30 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                 }
         }
 
-        private bool IsDataMissed(Dictionary<long, OpenFAST.Message> dictFastMsg, out long beginMsgSeqNum, out long endMsgSeqNum)
+        private bool IsDataMissed(List<NumbersData> nums, out long beginMsgSeqNum, out long endMsgSeqNum)
         {
             // проверяем пропуски данных
-            List<long> keys = dictFastMsg.Keys.ToList();
             beginMsgSeqNum = 0; // начало пропущенных данных
             endMsgSeqNum = 0; // конец пропущенных данных
 
-            if (keys.Count < 2)
+            if (nums.Count < 2)
                 return false;
 
-            keys.Sort();
-           
+            nums.Sort((x, y) => x.RptSeq.CompareTo(y.RptSeq));
 
-            for (int i = 1; i < keys.Count - 1; i++)
+            for (int i = 1; i < nums.Count; i++)
             {
-                if (keys[i] != keys[i - 1] + 1)
+                if (nums[i].RptSeq != nums[i - 1].RptSeq + 1)
                 {
                     if (beginMsgSeqNum == 0)
-                        beginMsgSeqNum = keys[i - 1] + 1;
+                        beginMsgSeqNum = nums[i - 1].MsgSeqNum + 1;
 
-                    endMsgSeqNum = keys[i] - 1;
+                    endMsgSeqNum = nums[i].MsgSeqNum - 1;
+
                 }
             }
 
-           if(beginMsgSeqNum != 0)
+            if (beginMsgSeqNum != 0)
                 return true; // данные пропущены
            else return false;
         }
@@ -1987,8 +1999,112 @@ namespace OsEngine.Market.Servers.FixFastCurrency
             }
         }
 
-        // FIX
-        List<string> _tagsAndValues = new List<string>();
+        /// <summary>
+        /// Восстановление данных по TCP
+        /// </summary>
+        private void RecoverData()
+        {
+            byte[] buffer = new byte[4096];
+            byte[] sizeBuffer = new byte[4];
+
+            string currentFeed = "OLR";
+
+            Thread.Sleep(1000);
+
+            while (true)
+            {
+                try
+                {
+                    if (_historicalReplayEndPoint == null)
+                    {
+                        Thread.Sleep(1);
+                        continue;
+                    }
+
+                    if (ServerStatus == ServerConnectStatus.Disconnect)
+                    {
+                        Thread.Sleep(1);
+                        continue;
+                    }
+
+                    // проверяем нужно ли восстанавливать какие-либо данные
+                    if (_missingOLRBeginSeqNo > 0 && _missingOLRData && !_ordersIncremental.ContainsKey(_missingOLRBeginSeqNo))
+                    {
+                        currentFeed = "OLR"; // восстанавливаем данные из потока ордеров
+
+                        SendLogMessage($"Trying to recover missing OLR SeqNo: {_missingOLRBeginSeqNo}-{_missingOLREndSeqNo}", LogMessageType.System);
+                    }
+                    else
+                    if (_missingTLRBeginSeqNo > 0 && _missingTLRData && !_tradesIncremental.ContainsKey(_missingTLRBeginSeqNo))
+                    {
+                        currentFeed = "TLR"; // восстанавливаем данные из потока сделок
+                        SendLogMessage($"Trying to recover missing TLR SeqNo: {_missingTLRBeginSeqNo}-{_missingTLREndSeqNo}", LogMessageType.System);
+                    }
+                    else
+                    {
+                        // отдыхаем полсекунды, ничего не надо восстанавливать
+                        Thread.Sleep(500);
+                        continue;
+                    }
+
+                    lock (_socketLockerHistoricalReplay)
+                    {
+                        // init historical replay socket
+                        _historicalReplaySocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+
+                        // начинаем общение с 1
+                        int msgSeqNum = 1;
+
+                        // 1. Соединяемся с потоком восстановления по TCP
+                        _historicalReplaySocket.Connect(_historicalReplayEndPoint);
+
+                        // 2. Отправляем запрос на подключение к потоку восстановления
+                        FASTHeader header = new FASTHeader();
+                        header.MsgType = "A"; //Тип сообщения на установку сессии
+                        header.SenderCompID = "OsEngine";
+                        header.TargetCompID = "MOEX"; // TODO: id фирмы брокера (?)
+                        header.MsgSeqNum = msgSeqNum++;
+
+                        FASTLogonMessage logonMessageBody = new FASTLogonMessage();
+                        logonMessageBody.Username = "user0";
+                        logonMessageBody.Password = "pass0";
+
+                        //Отправляем сообщение
+                        SendFIXMessage(_historicalReplaySocket, header, logonMessageBody);
+
+                        // получаем ответ - должен быть Logon
+                        sizeBuffer = new byte[4];
+                        int length = 0;
+                        try
+                        {
+                            length = _historicalReplaySocket.Receive(sizeBuffer, 4, SocketFlags.None);
+                        }
+                        catch (Exception ex)
+                        {
+                            SendLogMessage("Error receiving Data " + ex.ToString(), LogMessageType.Error);
+                            if (ServerStatus != ServerConnectStatus.Disconnect)
+                            {
+                                ServerStatus = ServerConnectStatus.Disconnect;
+                                DisconnectEvent();
+                            }
+                        }
+
+                    }
+
+                }
+                catch 
+                { 
+                
+                }
+
+            }
+        }
+
+
+
+
+                        // FIX
+                        List<string> _tagsAndValues = new List<string>();
 
         private void FixMessageReader()
         {
@@ -2429,12 +2545,22 @@ namespace OsEngine.Market.Servers.FixFastCurrency
 
         #region 11 Queries
 
-        public void SendMessage(string message)
+        private void SendMessage(string message)
         {
             byte[] dataMes = Encoding.ASCII.GetBytes(message);
             _stream.Write(dataMes, 0, dataMes.Length);
 
             _msgSeqNum++;
+        }
+
+        private void GetDataTCP()
+        {
+            CreateSocketConnections(GetAddressesForFastConnect("Historical Replay"));
+
+            IPAddress ipAddr = IPAddress.Parse(ipAddressString);
+
+            _historicalReplayEndPoint = new IPEndPoint(ipAddr, int.Parse(portString));
+
         }
 
 
@@ -2447,7 +2573,7 @@ namespace OsEngine.Market.Servers.FixFastCurrency
         //                continue;
         // }
 
-    public List<FastConnection> GetAddressesForFastStream(string connectionType)
+    public List<FastConnection> GetAddressesForFastConnect(string connectionType)
         {
             // прочитать конфиг FIX/FAST соединения и вернуть список с адресами подключения
 
@@ -2465,17 +2591,24 @@ namespace OsEngine.Market.Servers.FixFastCurrency
 
                 if (!feedType.Equals(connectionType)) continue;
 
-                //if (feedType.Equals("Historical Replay")) continue;
-                //if (feedType.Equals("Instrument Status")) continue;
+                if (feedType.Equals("Historical Replay"))
+                {
+                    FastConnection connection = new FastConnection();
 
-                //if (feedType.Equals("Instrument Replay")) continue;
-                //if (feedType.Equals("Statistics Snapshot")) continue;
-                //if (feedType.Equals("Statistics Incremental")) continue;
-                //if (feedType.Equals("Trades Snapshot")) continue;
-                //if (feedType.Equals("Trades Incremental")) continue;
-                //if (feedType.Equals("Orders Snapshot")) continue;
-                //if (feedType.Equals("Orders Incremental")) continue;
+                    var repadr = connectNodes[i] as XmlNode;
 
+                    if (repadr != null)
+                    {
+                        connection.FeedType = feedType;
+                        connection.SrsIP = repadr.SelectSingleNode("ip").InnerText;
+                        connection.Port = Convert.ToInt32(repadr.SelectSingleNode("port").InnerText);
+                    }
+                    else { SendLogMessage("Couldn't get a TCP recovery address", LogMessageType.Error); }
+
+                    fastConnections.Add(connection);
+                    return fastConnections;
+                }
+               
                 XmlNodeList feed = connectNodes[i].SelectNodes("feed");
 
                 for (int j = 0; j < feed.Count; j++)
@@ -2489,8 +2622,6 @@ namespace OsEngine.Market.Servers.FixFastCurrency
                     connection.Port = Convert.ToInt32(feed[j].SelectSingleNode("port").InnerText);
 
                     fastConnections.Add(connection);
-
-                  // Console.WriteLine($"I listen: {feedType}-{feedId}");
 
                 }
 
