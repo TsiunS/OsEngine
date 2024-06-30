@@ -2018,6 +2018,8 @@ namespace OsEngine.Market.Servers.FixFastCurrency
 
             string currentFeed = "OLR";
 
+            string fastPoint = "TEST";
+
             Thread.Sleep(1000);
 
             while (true)
