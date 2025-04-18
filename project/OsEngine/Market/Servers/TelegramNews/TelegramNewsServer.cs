@@ -22,8 +22,9 @@ namespace OsEngine.Market.Servers.TelegramNews
 
             CreateParameterString("Telegram channel IDs", "");
             CreateParameterInt("API ID", 0);
-            CreateParameterString("API Hash", "");
+            CreateParameterPassword("API Hash", "");
             CreateParameterString("Phone number", "");
+
         }
     }
 
@@ -58,7 +59,7 @@ namespace OsEngine.Market.Servers.TelegramNews
         {
             _channelsIDsString = ((ServerParameterString)ServerParameters[0]).Value;
             _apiID = ((ServerParameterInt)ServerParameters[1]).Value;
-            _apiHash = ((ServerParameterString)ServerParameters[2]).Value;
+            _apiHash = ((ServerParameterPassword)ServerParameters[2]).Value;
             _phoneNumber = ((ServerParameterString)ServerParameters[3]).Value;
 
             if (string.IsNullOrEmpty(_channelsIDsString))
