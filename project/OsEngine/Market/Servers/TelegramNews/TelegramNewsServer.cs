@@ -109,7 +109,7 @@ namespace OsEngine.Market.Servers.TelegramNews
 
             _client = Td.Client.Create(new UpdateHandler());
 
-            // ������� �����������
+   
             while (ServerStatus == ServerConnectStatus.Disconnect)
             {
                 // await authorization
@@ -188,7 +188,7 @@ namespace OsEngine.Market.Servers.TelegramNews
                     }
                     else
                     {
-                        // ������ �����������
+                        // отмена авторизации
                         _haveAuthorization = false;
 
                         if (_client != null && _defaultHandler != null)
@@ -210,7 +210,7 @@ namespace OsEngine.Market.Servers.TelegramNews
                     }
                     else
                     {
-                        // ������ �����������
+                        // отмена авторизации
                         _haveAuthorization = false;
 
                         if (_client != null && _defaultHandler != null)
@@ -314,7 +314,7 @@ namespace OsEngine.Market.Servers.TelegramNews
                         continue;
                     }
 
-                    // ���� ������� ����������� ����� ��������
+                    // если разлогинились во сремя коннекта
                     if (!_haveAuthorization)
                     {
                         if (ServerStatus != ServerConnectStatus.Disconnect)
@@ -398,8 +398,7 @@ namespace OsEngine.Market.Servers.TelegramNews
                 _allChatTitlesDownloaded = true;
             }
         }
-
-        // ������������ �������� ���������
+  
         private void ProcessIncomingMessage(TdApi.Message message)
         {
             long chatId = message.ChatId;
@@ -418,8 +417,7 @@ namespace OsEngine.Market.Servers.TelegramNews
                 NewsEvent(news);
             }
         }
-
-        // ��������� ����� �� ������ ����� ���������
+ 
         private string ExtractMessageText(MessageContent content)
         {
             if (content is TdApi.MessageText messageText)
@@ -429,27 +427,27 @@ namespace OsEngine.Market.Servers.TelegramNews
             else if (content is TdApi.MessagePhoto photo)
             {
                 if (photo.Caption != null)
-                    return photo.Caption.Text.IsNullOrEmpty() ? "[���� ��� �������]" : photo.Caption.Text;
+                    return photo.Caption.Text.IsNullOrEmpty() ? "[фото без подписи]" : photo.Caption.Text;
                 else
-                    return "[���� ��� �������]";
+                    return "[фото без подписи]";
             }
             else if (content is TdApi.MessageDocument doc)
             {
                 if (doc.Caption != null)
-                    return doc.Caption.Text.IsNullOrEmpty() ? "[�������� ��� ��������]" : doc.Caption.Text;
+                    return doc.Caption.Text.IsNullOrEmpty() ? "[документ без описания]" : doc.Caption.Text;
                 else
-                    return "[�������� ��� ��������]";
+                    return "[документ без описания]";
             }
             else if (content is TdApi.MessageVideo video)
             {
                 if (video.Caption != null)
-                    return video.Caption.Text.IsNullOrEmpty() ? "[����� ��� �������]" : video.Caption.Text;
+                    return video.Caption.Text.IsNullOrEmpty() ? "[видео без подписи]" : video.Caption.Text;
                 else
-                    return "[����� ��� �������]";
+                    return "[видео без подписи]";
             }
             else
             {
-                return $"[��������� ���� {content.GetType().Name}]";
+                return $"[сообщение типа {content.GetType().Name}]";
             }
         }
 
