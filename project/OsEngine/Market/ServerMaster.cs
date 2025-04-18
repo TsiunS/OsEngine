@@ -74,6 +74,7 @@ using OsEngine.Market.Servers.CoinEx.Futures;
 using OsEngine.Market.Servers.RSSNews;
 using OsEngine.Market.Servers.SmartLabNews;
 using OsEngine.Market.Servers.AE;
+using OsEngine.Market.Servers.TelegramNews;
 
 
 namespace OsEngine.Market
@@ -235,6 +236,7 @@ namespace OsEngine.Market
                 serverTypes.Add(ServerType.RSSNews);
                 serverTypes.Add(ServerType.SmartLabNews);
                 serverTypes.Add(ServerType.AExchange);
+                serverTypes.Add(ServerType.TelegramNews);
 
 
                 // а теперь сортируем в зависимости от предпочтений пользователя
@@ -431,6 +433,10 @@ namespace OsEngine.Market
 
                 IServer newServer = null;
 
+                if (type == ServerType.TelegramNews)
+                {
+                    newServer = new TelegramNewsServer();
+                }
                 if (type == ServerType.AExchange)
                 {
                     newServer = new AExchangeServer();
@@ -1319,6 +1325,10 @@ namespace OsEngine.Market
                 {
                     serverPermission = new AExchangeServerPermission();
                 }
+                else if (type == ServerType.TelegramNews)
+                {
+                    serverPermission = new TelegramNewsServerPermission();
+                }
 
 
                 if (serverPermission != null)
@@ -1822,6 +1832,12 @@ namespace OsEngine.Market
         /// Options exchange Alternative Exchange ae.exchange
         /// Опционная биржа Alternative Exchange ae.exchange
         /// </summary>
-        AExchange
+        AExchange,
+
+        /// <summary>
+        /// Reading news from Telegram
+        /// Чтение новостей с Telegram
+        /// </summary>
+        TelegramNews,
     }
 }

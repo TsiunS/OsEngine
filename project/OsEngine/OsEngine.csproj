@@ -981,6 +981,14 @@
     <Compile Include="Market\Servers\Entity\TimeManager.cs" />
     <Compile Include="Market\Servers\SmartLabNews\SmartLabNewsServer.cs" />
     <Compile Include="Market\Servers\SmartLabNews\SmartLabNewsServerPermission.cs" />
+    <Compile Include="Market\Servers\TelegramNews\TelegramNewsServer.cs" />
+    <Compile Include="Market\Servers\TelegramNews\TelegramNewsServerPermission.cs" />
+    <Compile Include="Market\Servers\TelegramNews\TGAuthEntity\AuthTGCodeDialogUi.xaml.cs">
+      <DependentUpon>AuthTGCodeDialogUi.xaml</DependentUpon>
+    </Compile>
+    <Compile Include="Market\Servers\TelegramNews\TGAuthEntity\AuthTGPasswordDialogUi.xaml.cs">
+      <DependentUpon>AuthTGPasswordDialogUi.xaml</DependentUpon>
+    </Compile>
     <Compile Include="Market\Servers\Tester\GoToUi.xaml.cs">
       <DependentUpon>GoToUi.xaml</DependentUpon>
     </Compile>
@@ -1714,6 +1722,14 @@
       <Generator>MSBuild:Compile</Generator>
     </Page>
     <Page Include="Market\Servers\Optimizer\OptimizerDataStorageUi.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
+    <Page Include="Market\Servers\TelegramNews\TGAuthEntity\AuthTGCodeDialogUi.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
+    <Page Include="Market\Servers\TelegramNews\TGAuthEntity\AuthTGPasswordDialogUi.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
     </Page>
