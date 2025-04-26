@@ -9,10 +9,6 @@ using OsEngine.Market.Servers.TelegramNews.TGAuthEntity;
 using TL;
 using Message = TL.Message;
 using System.IO;
-using Grpc.Core;
-using Newtonsoft.Json.Linq;
-using OsEngine.Market.Servers.Alor.Json;
-using static OsEngine.Market.Servers.HTX.Spot.Entity.ResponseAccountValuation;
 
 
 namespace OsEngine.Market.Servers.TelegramNews
@@ -229,7 +225,7 @@ namespace OsEngine.Market.Servers.TelegramNews
                 case "api_hash": return _apiHash;
                 case "phone_number": return _phoneNumber;
                 case "session_pathname": return @"Engine\Log\TelegramLogs\WTelegram.session";
-                case "device_model": return "OsEngine-TelegramClient";
+                case "device_model": return "OsEngine";
                 case "verification_code": return GetCode();
                 case "password": return GetPassword();     // if user has enabled 2FA
                 default: return null;                  // let WTelegramClient decide the default config
