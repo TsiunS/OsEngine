@@ -97,15 +97,15 @@ namespace OsEngine.Market.Servers.TelegramNews
             {
                 if (tgChannelsIDs[i].StartsWith("-100"))
                 {
-                    _trackedChats.Add(tgChannelsIDs[i].Substring(4), "");
+                    _trackedChats.Add(tgChannelsIDs[i].Substring(4), ( null, "", false));
                 }
                 else if (tgChannelsIDs[i].StartsWith("-"))
                 {
-                    _trackedChats.Add(tgChannelsIDs[i].Substring(1), "");
+                    _trackedChats.Add(tgChannelsIDs[i].Substring(1), (null, "", false));
                 }
                 else
                 {
-                    _trackedChats.Add(tgChannelsIDs[i], "");
+                    _trackedChats.Add(tgChannelsIDs[i], (null, "", false));
                 }
             }
 
@@ -136,7 +136,26 @@ namespace OsEngine.Market.Servers.TelegramNews
                         {
                             if (_trackedChats.ContainsKey(en.Current.Key.ToString()))
                             {
-                                _trackedChats[en.Current.Key.ToString()] = en.Current.Value.Title;
+                                InputPeer iP = chats.Result.chats[en.Current.Key];
+                                string title = en.Current.Value.Title;
+                                bool isPublic = false;
+
+                                if (en.Current.Value is Channel channel)
+                                {
+
+                                    // Проверяем, является ли канал публичным
+                                    if (channel.username != null)
+                                    {
+                                        isPublic = true;
+                                        SendLogMessage($"Канал {channel.title} является публичным (username: {channel.username})", LogMessageType.NoName);
+                                    }
+                                    else
+                                    {
+                                       SendLogMessage($"Канал {channel.title} является приватным", LogMessageType.NoName);
+                                    }
+                                } 
+
+                                _trackedChats[en.Current.Key.ToString()] = (iP, title, isPublic);
                             }
                         }
                     }
@@ -153,7 +172,10 @@ namespace OsEngine.Market.Servers.TelegramNews
                         {
                             if (_trackedChats.ContainsKey(enr.Current.Key.ToString()))
                             {
-                                _trackedChats[enr.Current.Key.ToString()] = enr.Current.Value.first_name;
+                                InputPeer iP = dialogs.Result.chats[enr.Current.Key];
+                                string name = enr.Current.Value.first_name;
+
+                                _trackedChats[enr.Current.Key.ToString()] = (iP, name, false);
                             }
                         }
                     }
@@ -168,7 +190,7 @@ namespace OsEngine.Market.Servers.TelegramNews
                     return;
                 }
             }
-            catch (RpcException ex) when (ex.Code == 401) // AUTH_KEY_UNREGISTERED
+            catch (TL.RpcException ex) when (ex.Code == 401) // AUTH_KEY_UNREGISTERED
             {
                 SendLogMessage("The session is invalid. Delete the WTelegram.session log file and try again.", LogMessageType.Error);
                 return;
@@ -201,7 +223,7 @@ namespace OsEngine.Market.Servers.TelegramNews
 
                 return true;
             }
-            catch (RpcException rpcEx)
+            catch (TL.RpcException rpcEx)
             {
                 SendLogMessage($"Telegram API Error: {rpcEx.Message} (code: {rpcEx.Code})", LogMessageType.Error);
                 return false;
@@ -227,7 +249,12 @@ namespace OsEngine.Market.Servers.TelegramNews
                 case "api_hash": return _apiHash;
                 case "phone_number": return _phoneNumber;
                 case "session_pathname": return @"Engine\Log\TelegramLogs\WTelegram.session";
-                case "device_model": return "OsEngine";
+                case "device_model": return "Desktop"; 
+                case "system_version": return "Windows 10"; 
+                case "app_version": return "4.8.1"; 
+                case "system_lang_code": return "en";
+                case "lang_pack": return "tdesktop"; 
+                case "lang_code": return "en";
                 case "verification_code": return GetCode();
                 case "password": return GetPassword();     // if user has enabled 2FA
                 default: return null;                  // let WTelegramClient decide the default config
@@ -330,7 +357,8 @@ namespace OsEngine.Market.Servers.TelegramNews
 
         private static WTelegram.Client _client;
         private static WTelegram.UpdateManager Manager;
-        private static Dictionary<string, string> _trackedChats = new Dictionary<string, string>();
+        private static Dictionary<string, (InputPeer, string, bool)> _trackedChats = new Dictionary<string, (InputPeer, string, bool)>();
+        private Dictionary<long, DateTime> _timeChannelsSponsorMsg = new Dictionary<long, DateTime>();
 
         #endregion
 
@@ -361,14 +389,17 @@ namespace OsEngine.Market.Servers.TelegramNews
             return Task.CompletedTask;
         }
 
-        private void HandleMessage(Message message)
+        private async void HandleMessage(Message message)
         {
+          
             string chatId = message.Peer.ID.ToString();
 
-            if (_trackedChats.TryGetValue(chatId, out string chatTitle))
+
+            if (_trackedChats.TryGetValue(chatId, out (InputPeer, string, bool) chatElements))
             {
+
                 string messageText = message.message;
-                string source = string.IsNullOrEmpty(chatTitle) ? chatId : chatTitle;
+                string source = string.IsNullOrEmpty(chatElements.Item2) ? chatId : chatElements.Item2;
 
                 News news = new News();
 
@@ -377,6 +408,48 @@ namespace OsEngine.Market.Servers.TelegramNews
                 news.TimeMessage = message.Date.ToLocalTime();
 
                 NewsEvent(news);
+
+                // Отметить сообщение прочитанным
+                await _client.Messages_ReadHistory(chatElements.Item1, max_id: message.id);
+
+               
+                if (chatElements.Item3) // публичный канал
+                {
+                    // уже читали спонсорское сообщение с этого канала и прошло более 5 минут
+                    if (_timeChannelsSponsorMsg.TryGetValue(chatElements.Item1.ID, out DateTime timeOfReadingMessage)
+                        && timeOfReadingMessage.AddMinutes(5) < DateTime.Now)
+                    {
+                         HandleSponsoredMessage(chatElements.Item1);
+                    }
+                }
+            }
+        }
+
+
+        private async void HandleSponsoredMessage(InputPeer inputPeer)
+        {
+               // получить спонсорские сообщения у данного канала
+            var sponsMsgs = await _client.Messages_GetSponsoredMessages(inputPeer);
+
+            if(sponsMsgs == null)
+            {
+                return;
+            }
+            else
+            {
+                for (int i = 0; i < sponsMsgs.messages.Length; i++)
+                {
+                    // отметить прочитанным
+                   bool hasBeenRaed = await _client.Messages_ViewSponsoredMessage(sponsMsgs.messages[i].random_id);
+
+                    if (hasBeenRaed)
+                    {    
+                        // закэшировать на 5 мин
+                        _timeChannelsSponsorMsg.Add(inputPeer.ID, DateTime.Now);
+
+                        SendLogMessage($"Посмотрел рекламу {sponsMsgs.messages[i].title} от  {sponsMsgs.messages[i].sponsor_info}", LogMessageType.Signal);
+                    }
+                }
             }
         }
 
