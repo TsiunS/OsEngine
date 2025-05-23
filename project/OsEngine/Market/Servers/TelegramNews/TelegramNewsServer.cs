@@ -1,5 +1,4 @@
-﻿using Grpc.Core;
-using OsEngine.Entity;
+﻿using OsEngine.Entity;
 using OsEngine.Logging;
 using OsEngine.Market.Servers.Entity;
 using OsEngine.Market.Servers.TelegramNews.TGAuthEntity;
@@ -7,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
-using System.Threading;
 using System.Threading.Tasks;
 using TL;
 using Message = TL.Message;
@@ -136,7 +134,6 @@ namespace OsEngine.Market.Servers.TelegramNews
                         {
                             if (_trackedChats.ContainsKey(en.Current.Key.ToString()))
                             {
-                                InputPeer iP = chats.Result.chats[en.Current.Key];
                                 string title = en.Current.Value.Title;
                                 bool isPublic = false;
 
@@ -148,6 +145,8 @@ namespace OsEngine.Market.Servers.TelegramNews
                                     {
                                         isPublic = true;
                                         SendLogMessage($"Канал {channel.title} является публичным (username: {channel.username})", LogMessageType.NoName);
+
+                                        _timeChannelsSponsorMsg.Add(en.Current.Key, DateTime.Now.AddMinutes(-6));
                                     }
                                     else
                                     {
@@ -155,33 +154,12 @@ namespace OsEngine.Market.Servers.TelegramNews
                                     }
                                 } 
 
-                                _trackedChats[en.Current.Key.ToString()] = (iP, title, isPublic);
+                                _trackedChats[en.Current.Key.ToString()] = (chats.Result.chats[en.Current.Key], title, isPublic);
                             }
                         }
                     }
 
-                    Thread.Sleep(100);
-
-                    Task<Messages_Dialogs> dialogs = _client.Messages_GetAllDialogs();
-
-                    if (dialogs != null)
-                    {
-                        Dictionary<long, User>.Enumerator enr = dialogs.Result.users.GetEnumerator();
-
-                        while (enr.MoveNext())
-                        {
-                            if (_trackedChats.ContainsKey(enr.Current.Key.ToString()))
-                            {
-                                InputPeer iP = dialogs.Result.chats[enr.Current.Key];
-                                string name = enr.Current.Value.first_name;
-
-                                _trackedChats[enr.Current.Key.ToString()] = (iP, name, false);
-                            }
-                        }
-                    }
-
-                    Thread.Sleep(100);
-
+                   
                     Manager = _client.WithUpdateManager(UpdatesMessages);
                 }
                 else
@@ -324,6 +302,7 @@ namespace OsEngine.Market.Servers.TelegramNews
         public void Dispose()
         {
             _trackedChats.Clear();
+            _timeChannelsSponsorMsg.Clear();
 
             _client?.Dispose();
 
@@ -357,7 +336,7 @@ namespace OsEngine.Market.Servers.TelegramNews
 
         private static WTelegram.Client _client;
         private static WTelegram.UpdateManager Manager;
-        private static Dictionary<string, (InputPeer, string, bool)> _trackedChats = new Dictionary<string, (InputPeer, string, bool)>();
+        private static Dictionary<string, (ChatBase, string, bool)> _trackedChats = new Dictionary<string, (ChatBase, string, bool)>();
         private Dictionary<long, DateTime> _timeChannelsSponsorMsg = new Dictionary<long, DateTime>();
 
         #endregion
@@ -395,11 +374,13 @@ namespace OsEngine.Market.Servers.TelegramNews
             string chatId = message.Peer.ID.ToString();
 
 
-            if (_trackedChats.TryGetValue(chatId, out (InputPeer, string, bool) chatElements))
+            if (_trackedChats.TryGetValue(chatId, out (ChatBase, string, bool) chatElements))
             {
 
                 string messageText = message.message;
                 string source = string.IsNullOrEmpty(chatElements.Item2) ? chatId : chatElements.Item2;
+
+                SendLogMessage($"Пришло сообщение от: {source}", LogMessageType.Signal);
 
                 News news = new News();
 
@@ -409,9 +390,21 @@ namespace OsEngine.Market.Servers.TelegramNews
 
                 NewsEvent(news);
 
-                // Отметить сообщение прочитанным
-                await _client.Messages_ReadHistory(chatElements.Item1, max_id: message.id);
+               // InputPeer iP = chats.Result.chats[en.Current.Key];
 
+                try
+                {
+                    // Отметить канал прочитанным
+
+                  var readChannel = await  _client.Channels_ReadHistory(chatElements.Item1 as Channel);
+
+                    SendLogMessage($"Прочитано от: {source}: {readChannel} ", LogMessageType.Signal);
+                }
+                catch (Exception e)
+                {
+
+                    SendLogMessage($"Ошибка прочтения от: {source}:\n {e}", LogMessageType.Error);
+                }
                
                 if (chatElements.Item3) // публичный канал
                 {
@@ -419,7 +412,9 @@ namespace OsEngine.Market.Servers.TelegramNews
                     if (_timeChannelsSponsorMsg.TryGetValue(chatElements.Item1.ID, out DateTime timeOfReadingMessage)
                         && timeOfReadingMessage.AddMinutes(5) < DateTime.Now)
                     {
-                         HandleSponsoredMessage(chatElements.Item1);
+                        SendLogMessage($"Начинаю проверку рекламы от: {source}", LogMessageType.Signal);
+
+                        HandleSponsoredMessage(chatElements.Item1);
                     }
                 }
             }
@@ -433,10 +428,13 @@ namespace OsEngine.Market.Servers.TelegramNews
 
             if(sponsMsgs == null)
             {
+                SendLogMessage($"Рекламы нет. ID: {inputPeer.ID}", LogMessageType.Signal);
                 return;
             }
             else
             {
+                SendLogMessage($"Рекламы: {sponsMsgs.messages.Length} штук", LogMessageType.Signal);
+
                 for (int i = 0; i < sponsMsgs.messages.Length; i++)
                 {
                     // отметить прочитанным
@@ -445,7 +443,7 @@ namespace OsEngine.Market.Servers.TelegramNews
                     if (hasBeenRaed)
                     {    
                         // закэшировать на 5 мин
-                        _timeChannelsSponsorMsg.Add(inputPeer.ID, DateTime.Now);
+                        _timeChannelsSponsorMsg[inputPeer.ID] = DateTime.Now;
 
                         SendLogMessage($"Посмотрел рекламу {sponsMsgs.messages[i].title} от  {sponsMsgs.messages[i].sponsor_info}", LogMessageType.Signal);
                     }
