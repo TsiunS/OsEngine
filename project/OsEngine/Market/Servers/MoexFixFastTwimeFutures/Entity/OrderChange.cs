@@ -1,4 +1,5 @@
-﻿namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
+﻿
+namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
 {
     public class OrderChange
     {
@@ -9,6 +10,7 @@
         public OrderType OrderType { get; set; }
         public double Price { get; set; }
         public double Volume { get; set; }
+        public int PriceLevel { get; set; }
     }
 
     public enum OrderAction
@@ -23,6 +25,7 @@
     {
         Bid,
         Ask,
+        EmptyBook,
         None
     }
 }

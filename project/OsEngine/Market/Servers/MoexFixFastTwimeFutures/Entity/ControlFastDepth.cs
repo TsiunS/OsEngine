@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 
 namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
 {
@@ -17,12 +18,12 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
 
     public class ControlDepthLevel
     {
-        public int ImmutabilityCount { get; set; }
-
         public double Ask;
 
         public double Bid;
 
         public double Price;
+
+        public DateTime ImmutabilityTime { get; set; } = DateTime.Now;
     }
 }

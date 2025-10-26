@@ -38,6 +38,8 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
             _msgBytes = msgBytes;
         }
 
+        public string ParseError { get; set; } = "Parse error:";
+
         public Order GetOrderReport()
         {
             ParseBytes();
@@ -122,7 +124,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
                 Timestamp = BitConverter.ToUInt64(_msgBytes, 16);
 
                 ulong unixTimeInSeconds = Timestamp / 1_000_000_000;
-                _transactTime = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(unixTimeInSeconds);
+                _transactTime = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(unixTimeInSeconds).AddHours(3);
 
                 if (_messageID == 7015)
                 {
@@ -193,11 +195,15 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
                 else
                 {
                     parseError = true;
+
+                    ParseError = $"MessageID={_messageID}, ClOrdId={ClOrdId}";
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 parseError = true;
+
+                ParseError = ex.Message;
             }
         }
     }

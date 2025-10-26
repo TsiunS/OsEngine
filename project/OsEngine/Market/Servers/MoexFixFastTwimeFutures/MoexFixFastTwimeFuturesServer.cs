@@ -1,20 +1,20 @@
 ﻿using OpenFAST;
+using OpenFAST.Codec;
+using OpenFAST.Template;
+using OpenFAST.Template.Loader;
 using OsEngine.Entity;
 using OsEngine.Logging;
 using OsEngine.Market.Servers.Entity;
+using OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
-using System.Net.Sockets;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Xml;
-using OpenFAST.Codec;
-using OpenFAST.Template.Loader;
-using OpenFAST.Template;
-using OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity;
 
 
 namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
@@ -44,6 +44,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             CreateParameterPath("Multicast Config Directory");
             CreateParameterInt("Limit of requests to the server (per second)", 30);
             CreateParameterBoolean("Use Options", false);
+            CreateParameterBoolean("Use FO-BOOK", true);
         }
     }
     public class MoexFixFastTwimeFuturesServerRealization : IServerRealization
@@ -66,14 +67,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             thread3.Name = "TradesReaderFromQueue";
             thread3.Start();
 
-            Thread thread4 = new Thread(GetFastMessagesByOrders);
-            thread4.Name = "GetterOrders";
-            thread4.Start();
-
-            Thread thread5 = new Thread(OrderMessagesReader);
-            thread5.Name = "OrdersReaderFromQueue";
-            thread5.Start();
-
             Thread thread6 = new Thread(RecoveryData);
             thread6.Name = "HistoricalReplayMoexFast";
             thread6.Start();
@@ -81,6 +74,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             Thread thread7 = new Thread(ProcessTradingServerEvents);
             thread7.Name = "TradeServerProcessing";
             thread7.Start();
+
         }
 
         public void Connect(WebProxy proxy)
@@ -106,6 +100,29 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                 int orderActionsLimit = ((ServerParameterInt)ServerParameters[11]).Value;
 
                 _useOptions = ((ServerParameterBool)ServerParameters[12]).Value;
+
+                _useFoBook = ((ServerParameterBool)ServerParameters[13]).Value;
+
+                if (_useFoBook)
+                {
+                    Thread thread4 = new Thread(GetFastMessagesFoBook20);
+                    thread4.Name = "GetterFoBook20";
+                    thread4.Start();
+
+                    Thread thread5 = new Thread(FoBook20MessagesReader);
+                    thread5.Name = "FoBook20ReaderFromQueue";
+                    thread5.Start();
+                }
+                else
+                {
+                    Thread thread4 = new Thread(GetFastMessagesByOrders);
+                    thread4.Name = "GetterOrders";
+                    thread4.Start();
+
+                    Thread thread5 = new Thread(OrderMessagesReader);
+                    thread5.Name = "OrdersReaderFromQueue";
+                    thread5.Start();
+                }
 
                 _rateGateForOrders = new RateGate(orderActionsLimit, TimeSpan.FromSeconds(1));
 
@@ -263,6 +280,9 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
             _tryingConnectRecoveryOrdersCount = 1;
             _tryingConnectRecoveryTradesCount = 1;
+
+            _foBook20AggDepths.Clear();
+
         }
 
         private void DeleteWebSocketConnection()
@@ -449,6 +469,61 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                     }
                 }
 
+                // закрываем сокеты получения данных FO-BOOK
+                if (_foBook20IncrementalSocketA != null)
+                {
+                    lock (_socketLockerOrdersIncremental)
+                    {
+                        try
+                        {
+                            _foBook20IncrementalSocketA.Close();
+                        }
+                        catch
+                        {
+                            // ignore
+                        }
+
+                        try
+                        {
+                            _foBook20IncrementalSocketB.Close();
+                        }
+                        catch
+                        {
+                            // ignore
+                        }
+
+                        _foBook20IncrementalSocketA = null;
+                        _foBook20IncrementalSocketB = null;
+                    }
+                }
+
+                if (_foBook20SnapshotSocketA != null && _foBook20SnapshotSocketB != null)
+                {
+                    lock (_socketLockerOrdersSnapshots)
+                    {
+                        try
+                        {
+                            _foBook20SnapshotSocketA.Close();
+                        }
+                        catch
+                        {
+                            // ignore
+                        }
+
+                        try
+                        {
+                            _foBook20SnapshotSocketB.Close();
+                        }
+                        catch
+                        {
+                            // ignore
+                        }
+
+                        _foBook20SnapshotSocketA = null;
+                        _foBook20SnapshotSocketB = null;
+                    }
+                }
+
                 lock (_socketLockerTrading)
                 {
                     // отключаемся от сервера TWIME 
@@ -614,6 +689,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
         #region 2 Properties
 
         private bool _useOptions;
+        private bool _useFoBook;
         private string _tradingProtocol = string.Empty;
         private Dictionary<int, Order> _ordersForClearing = new Dictionary<int, Order>();
 
@@ -683,6 +759,22 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
         private int _tryingConnectRecoveryTradesCount = 1;
         private bool _isTryingConnectToTradesReserveIP = false;
 
+        private string _sessionEventlocker = "sessionLocker";
+        private bool _isSessionOver = false;
+        private bool _missingOrdersData = false;
+        private TradeSessionStatus _sessionStatus = TradeSessionStatus.Open;
+        private TimeSpan _dayClearingTime = new TimeSpan(13, 43, 00);
+        private TimeSpan _nigthBreakTime = new TimeSpan(23, 48, 00);
+
+        private Socket _foBook20IncrementalSocketA;
+        private Socket _foBook20IncrementalSocketB;
+        private Socket _foBook20SnapshotSocketA;
+        private Socket _foBook20SnapshotSocketB;
+        List<Socket> _socketsFoBook20 = new List<Socket>();
+
+        DateTime _mdTimeStart = DateTime.Now;
+
+
         #endregion
 
         #region 3 Securities
@@ -691,7 +783,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
         {
             DateTime waitingTimeSecurities = DateTime.Now;
 
-            int minutesToGetSecurities = 2;
+            int minutesToGetSecurities = 1;
 
             if (_useOptions)
                 minutesToGetSecurities = 8;
@@ -895,7 +987,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                         }
                     }
 
-                    if (mdGroup.FeedType == "ORDERS-LOG" && mdGroup.FastConnections[i].Type == "Incremental")
+                    if (!_useFoBook && mdGroup.FeedType == "ORDERS-LOG" && mdGroup.FastConnections[i].Type == "Incremental")
                     {
                         if (mdGroup.FastConnections[i].Feed == "A")
                         {
@@ -910,7 +1002,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                         }
                     }
 
-                    if (mdGroup.FeedType == "ORDERS-LOG" && mdGroup.FastConnections[i].Type == "Snapshot")
+                    if (!_useFoBook && mdGroup.FeedType == "ORDERS-LOG" && mdGroup.FastConnections[i].Type == "Snapshot")
                     {
                         if (mdGroup.FastConnections[i].Feed == "A")
                         {
@@ -922,6 +1014,36 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                         {
                             _ordersSnapshotSocketB = socket;
                             _socketsOrders.Add(_ordersSnapshotSocketB);
+                        }
+                    }
+
+                    if (_useFoBook && mdGroup.FeedType == "FO-BOOK-20" && mdGroup.FastConnections[i].Type == "Incremental")
+                    {
+                        if (mdGroup.FastConnections[i].Feed == "A")
+                        {
+                            _foBook20IncrementalSocketA = socket;
+                            _socketsFoBook20.Add(_foBook20IncrementalSocketA);
+                        }
+
+                        if (mdGroup.FastConnections[i].Feed == "B")
+                        {
+                            _foBook20IncrementalSocketB = socket;
+                            _socketsFoBook20.Add(_foBook20IncrementalSocketB);
+                        }
+                    }
+
+                    if (_useFoBook && mdGroup.FeedType == "FO-BOOK-20" && mdGroup.FastConnections[i].Type == "Snapshot")
+                    {
+                        if (mdGroup.FastConnections[i].Feed == "A")
+                        {
+                            _foBook20SnapshotSocketA = socket;
+                            _socketsFoBook20.Add(_foBook20SnapshotSocketA);
+                        }
+
+                        if (mdGroup.FastConnections[i].Feed == "B")
+                        {
+                            _foBook20SnapshotSocketB = socket;
+                            _socketsFoBook20.Add(_foBook20SnapshotSocketB);
                         }
                     }
 
@@ -1144,23 +1266,41 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                     && _ordersIncrementalSocketA == null && _ordersIncrementalSocketB == null)
                 {
                     CreateSocketConnections("Derivative trades", "Incremental");
-                    CreateSocketConnections("Full orders log", "Incremental");
                 }
 
-                if (_ordersSnapshotSocketA == null && _ordersSnapshotSocketB == null)
+                if (_useFoBook)  // используем для стакана поток FO-BOOK
                 {
-                    CreateSocketConnections("Full orders log", "Snapshot");
+                    _foBook20AggDepths.Add(security.NameId, new MarketDepth());
+
+                    if (_foBook20IncrementalSocketA == null && _foBook20IncrementalSocketB == null)
+                        CreateSocketConnections("Top 20 price levels", "Incremental");
+
+                    if (_foBook20SnapshotSocketA == null && _foBook20SnapshotSocketB == null)
+                        CreateSocketConnections("Top 20 price levels", "Snapshot");
+
+                }
+                else
+                {
+                    if (_ordersIncrementalSocketA == null && _ordersIncrementalSocketB == null)
+                        CreateSocketConnections("Full orders log", "Incremental");
+
+                    if (_ordersSnapshotSocketA == null && _ordersSnapshotSocketB == null)
+                        CreateSocketConnections("Full orders log", "Snapshot");
+
+                    _stockChanges.Add(security.NameId, new List<OrderChange>());
+                    _orderNumsForCheckMissed.Add(security.NameId, new List<NumbersMD>());
+                    _controlDepths.Add(security.NameId, new ControlFastDepth());
+
                 }
 
                 _ordersSnapshotsByName.Add(security.NameId, new Snapshot());
                 _waitingDepthChanges.Add(security.NameId, new List<OrderChange>());
-                _stockChanges.Add(security.NameId, new List<OrderChange>());
+
 
                 //добавляем в необходимые списки
                 _depthChanges.Add(security.NameId, new List<OrderChange>());
                 _tradeNumsForCheckMissed.Add(security.NameId, new List<NumbersMD>());
-                _orderNumsForCheckMissed.Add(security.NameId, new List<NumbersMD>());
-                _controlDepths.Add(security.NameId, new ControlFastDepth());
+
 
                 _subscribedSecurities.Add(security.NameId);
                 _secNameById.Add(security.NameId, security.Name);
@@ -1187,7 +1327,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             return false;
         }
 
-        public event Action<News> NewsEvent { add { } remove { } }
+        public event Action<News> NewsEvent;
 
         #endregion
 
@@ -1266,7 +1406,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                 length = _socketsInstruments[s].Receive(buffer);
                             }
                         }
-                        catch (SocketException)
+                        catch (SocketException exception)
                         {
                             break;
                         }
@@ -1460,6 +1600,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                 newSecurity.Decimals = int.Parse(secDecimals);
                                 newSecurity.Decimals = GetDecimals(newSecurity.PriceStep);
                                 newSecurity.MarginBuy = msg.GetString("InitialMarginOnBuy").ToDecimal();
+                                newSecurity.MarginSell = msg.GetString("InitialMarginOnSell").ToDecimal();
                                 newSecurity.PriceLimitLow = msg.GetString("LowLimitPx").ToDecimal();
                                 newSecurity.PriceLimitHigh = msg.GetString("HighLimitPx").ToDecimal();
 
@@ -1475,8 +1616,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                 }
                 catch (OpenFAST.Error.DynErrorException ex)
                 {
-                    // TODO: внести в мастер
-                    SendLogMessage(ex.ToString(), LogMessageType.Error);
+                       SendLogMessage(ex.ToString(), LogMessageType.Error);
 
                     if (ServerStatus != ServerConnectStatus.Disconnect)
                     {
@@ -1550,7 +1690,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                 length = _socketsTrades[s].Receive(buffer);
                             }
                         }
-                        catch (SocketException)
+                        catch (SocketException exception)
                         {
                             // обычно возникает если мы прерываем блокирующую операцию
                             break;
@@ -1588,42 +1728,140 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                         SendMsgToQueue(msg, _tradeMessages);
                                     }
                                 }
-                            }
 
-                            if (msg.GetString("MessageType") == "4") // сброс номеров
-                            {
-                                _tradesIncremental.Clear();
-                                WriteLogTrades("Цикл изменений по трейдам закончился");
-                            }
-
-                            if (msg.GetString("MessageType") == "h" && msg.GetString("TradSesStatus") == "3") // Trading Session Status
-                            {
-                                SendLogMessage("Сессия завершена", LogMessageType.System);
-
-                                // отменяем активные однодневные ордера т.к. на бирже их снимут
-                                if (_ordersForClearing.Count > 0)
+                                if (_tradesIncremental.Count > 10000)
                                 {
-                                    Dictionary<int, Order>.Enumerator enumerator = _ordersForClearing.GetEnumerator();
-
-                                    while (enumerator.MoveNext())
+                                    for (long i = msgSeqNum - 5000; i > 1; i--)
                                     {
-                                        Order order = enumerator.Current.Value;
-                                        order.State = OrderStateType.Cancel;
-                                        order.TimeCancel = DateTime.UtcNow.AddHours(3);
-                                        order.TimeCallBack = DateTime.UtcNow.AddHours(3);
-                                        order.Comment = "This order was withdrawn by the exchange due to the expiration date";
-
-                                        MyOrderEvent(order);
+                                        _tradesIncremental.Remove(i);
                                     }
-                                    _ordersForClearing.Clear();
+
+                                    SendLogMessage($"FAST сообщений трейдов: {_tradesIncremental.Count}", LogMessageType.System);
+                                }
+                            }
+
+                            if (msg.GetString("MessageType") == "4") // Sequence Reset сброс номеров
+                            {
+                                long newSeqNo = msg.GetLong("NewSeqNo");
+
+                                _tradesIncremental.Clear();
+
+                                if (_tradeNumsForCheckMissed.Count > 0)
+                                {
+                                    Dictionary<string, List<NumbersMD>>.Enumerator tradesLists = _tradeNumsForCheckMissed.GetEnumerator();
+
+                                    while (tradesLists.MoveNext())
+                                    {
+                                        tradesLists.Current.Value.Clear();
+                                    }
                                 }
 
-                                // чистим  стакан
-                                Dictionary<string, List<OrderChange>>.Enumerator orderLists = _depthChanges.GetEnumerator();
+                                WriteLogTrades($"Цикл изменений по трейдам закончился. NewSeqNo: {newSeqNo}\nЧистим _tradesIncremental, _tradeNumsForCheckMissed");
+                            }
 
-                                while (orderLists.MoveNext())
+                            if (msg.GetString("MessageType") == "h") // Trading Session Status
+                            {
+                                if ((msg.GetString("TradSesStatus") == "1")) // сессия приостановлена
                                 {
-                                    orderLists.Current.Value.Clear();
+                                    SendLogMessage("Сессия приостановлена", LogMessageType.System);
+
+                                    if (DateTime.Now.TimeOfDay >= _dayClearingTime && DateTime.Now.TimeOfDay < _nigthBreakTime)
+                                    {
+                                        DepthCleaning();
+                                    }
+
+
+
+                                    if (DateTime.Now.TimeOfDay >= _nigthBreakTime)
+                                    {
+                                        SendLogMessage("Ночной перерыв", LogMessageType.System);
+                                    }
+
+
+                                }
+                                else if ((msg.GetString("TradSesStatus") == "2")) // сессия открыта
+                                {
+                                    _sessionStatus = TradeSessionStatus.Open;
+
+                                    lock (_sessionEventlocker)
+                                    {
+                                        _isSessionOver = false;
+                                    }
+
+                                    SendLogMessage("Сессия открыта", LogMessageType.System);
+
+                                }
+                                else if (msg.GetString("TradSesStatus") == "3") // сессия завершена
+                                {
+                                    SendLogMessage("Сессия завершена", LogMessageType.System);
+
+                                    _sessionStatus = TradeSessionStatus.Close;
+
+                                    if (DateTime.Now.TimeOfDay >= _dayClearingTime && DateTime.Now.TimeOfDay < _nigthBreakTime)
+                                    {
+                                        DepthCleaning();
+                                    }
+
+                                    lock (_sessionEventlocker)
+                                    {
+                                        _isSessionOver = true;
+                                    }
+
+
+                                    if (DateTime.Now.TimeOfDay >= _nigthBreakTime)
+                                    {
+                                        SendLogMessage("Ночной перерыв", LogMessageType.System);
+
+
+                                    }
+
+                                    // отменяем активные однодневные ордера т.к. на бирже их снимут
+                                    if (_ordersForClearing.Count > 0)
+                                    {
+                                        Dictionary<int, Order>.Enumerator enumerator = _ordersForClearing.GetEnumerator();
+
+                                        while (enumerator.MoveNext())
+                                        {
+                                            Order order = enumerator.Current.Value;
+                                            order.State = OrderStateType.Cancel;
+                                            order.TimeCancel = DateTime.UtcNow.AddHours(3);
+                                            order.TimeCallBack = DateTime.UtcNow.AddHours(3);
+                                            order.Comment = "This order was withdrawn by the exchange due to the expiration date";
+
+                                            MyOrderEvent(order);
+                                        }
+                                        _ordersForClearing.Clear();
+                                    }
+
+
+                                }
+                                else if ((msg.GetString("TradSesStatus") == "4")) // сессия назначена
+                                {
+                                    SendLogMessage("Сессия назначена", LogMessageType.System);
+
+                                }
+
+                                //===================TradSesEvent=========================//
+
+                                if ((msg.GetString("TradSesEvent") == "0")) // возобновление торгов после промежуточного клиринга или после ночного технологического перерыва
+                                {
+                                    lock (_sessionEventlocker)
+                                    {
+                                        _isSessionOver = false;
+                                    }
+
+                                    SendLogMessage("Возобновление торгов после промежуточного клиринга или после ночного технологического перерыва", LogMessageType.System);
+
+                                }
+                                else if ((msg.GetString("TradSesEvent") == "1")) // открытие и закрытие сессии
+                                {
+                                    SendLogMessage("Открытие и закрытие сессии", LogMessageType.System);
+
+                                }
+                                else if ((msg.GetString("TradSesEvent") == "3")) // Изменение статуса сессии
+                                {
+                                    SendLogMessage("Изменение статуса сессии", LogMessageType.System);
+
                                 }
                             }
                         }
@@ -1635,6 +1873,46 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                     Thread.Sleep(5000);
                 }
             }
+        }
+
+        private void DepthCleaning()
+        {
+            if (!_useFoBook)
+            {
+                SendLogMessage("Удаление заявок прошлой сессии", LogMessageType.System);
+
+                if (_depthChanges.Count > 0)
+                {
+                    Dictionary<string, List<OrderChange>>.Enumerator orderLists = _depthChanges.GetEnumerator();
+
+                    while (orderLists.MoveNext())
+                    {
+                        orderLists.Current.Value.Clear();
+                    }
+                }
+
+                if (_controlDepths.Count > 0)
+                {
+                    Dictionary<string, ControlFastDepth>.Enumerator controlDepthLevels = _controlDepths.GetEnumerator();
+
+                    while (controlDepthLevels.MoveNext())
+                    {
+                        controlDepthLevels.Current.Value.AsksF.Clear();
+                        controlDepthLevels.Current.Value.BidsF.Clear();
+                    }
+                }
+
+                if (_stockChanges.Count > 0)
+                {
+                    Dictionary<string, List<OrderChange>>.Enumerator stockOrdersList = _stockChanges.GetEnumerator();
+
+                    while (stockOrdersList.MoveNext())
+                    {
+                        stockOrdersList.Current.Value.Clear();
+                    }
+                }
+            }
+
         }
 
         private ConcurrentQueue<OpenFAST.Message> _tradeMessages = new ConcurrentQueue<OpenFAST.Message>();
@@ -1686,26 +1964,30 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                                 int RptSeqFromTrades = groupVal.GetInt("RptSeq");
 
-                                // проверка пропуска даных по RptSeq и дублирования
-                                if (_tradeNumsForCheckMissed[nameID].Find(n => n.RptSeq == RptSeqFromTrades) != null)
-                                    continue;
-
-                                _tradeNumsForCheckMissed[nameID].Add(new NumbersMD { MsgSeqNum = msgSeqNum, RptSeq = RptSeqFromTrades });
-
-                                if (_endOfRecoveryOrders & _endOfRecoveryTrades)
+                                // Уже пытались восстанавливать трейды. Связи нет. Проверять пропуски бессмыслено
+                                if (_tryingConnectRecoveryTradesCount < 6)
                                 {
-                                    int missedRptSeqCount = 0;
+                                    // проверка пропуска даных по RptSeq и дублирования
+                                    if (_tradeNumsForCheckMissed[nameID].Find(n => n.RptSeq == RptSeqFromTrades) != null)
+                                        continue;
 
-                                    bool missingTradesData = IsDataMissed(_tradeNumsForCheckMissed[nameID], out _missingTradesBeginSeqNo, out _missingTradesEndSeqNo, out missedRptSeqCount, out _missingTradesRptSeqNums);
+                                    _tradeNumsForCheckMissed[nameID].Add(new NumbersMD { MsgSeqNum = msgSeqNum, RptSeq = RptSeqFromTrades });
 
-                                    if (!_limitTradeReq && missedRptSeqCount >= 2 && missingTradesData)
+                                    if (_endOfRecoveryTrades)
                                     {
-                                        WriteLogTrades($"По инструменту {_secNameById[nameID]} пропуск данных о трейдах. Номера сообщений с {_missingTradesBeginSeqNo} по {_missingTradesEndSeqNo}. Количество пропущенных RptSeq: {missedRptSeqCount}\n");
+                                        int missedRptSeqCount = 0;
 
-                                        if (_historicalReplayEndPointForTrades == null)
-                                            CreateSocketConnections("Derivative trades", "Historical Replay");
+                                        bool missingTradesData = IsDataMissed(_tradeNumsForCheckMissed[nameID], out _missingTradesBeginSeqNo, out _missingTradesEndSeqNo, out missedRptSeqCount, out _missingTradesRptSeqNums);
 
-                                        _endOfRecoveryTrades = false;
+                                        if (!_limitTradeReq && missedRptSeqCount >= 2 && missingTradesData)
+                                        {
+                                            WriteLogTrades($"По инструменту {_secNameById[nameID]} пропуск данных о трейдах. Номера сообщений с {_missingTradesBeginSeqNo} по {_missingTradesEndSeqNo}. Количество пропущенных RptSeq: {missedRptSeqCount}\n");
+
+                                            if (_historicalReplayEndPointForTrades == null)
+                                                CreateSocketConnections("Derivative trades", "Historical Replay");
+
+                                            _endOfRecoveryTrades = false;
+                                        }
                                     }
                                 }
 
@@ -1748,6 +2030,13 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                 }
             }
         }
+
+
+
+
+
+
+
 
         Dictionary<long, OpenFAST.Message> _ordersIncremental = new Dictionary<long, OpenFAST.Message>();
         Dictionary<long, OpenFAST.Message> _ordersSnapshotsMsgs = new Dictionary<long, OpenFAST.Message>(); // используется для проверки пропуска собщений
@@ -1806,7 +2095,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                 length = _socketsOrders[s].Receive(buffer);
                             }
                         }
-                        catch (SocketException)
+                        catch (SocketException exception)
                         {
                             break;
                         }
@@ -1832,7 +2121,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                             long msgSeqNum = msg.GetLong("MsgSeqNum");
 
-                            if (msg.GetString("MessageType") == "W")
+                            if (msg.GetString("MessageType") == "W") // снэпшоты
                             {
                                 string nameID = msg.GetString("SecurityID");
 
@@ -1845,7 +2134,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                 }
                             }
 
-                            if (msg.GetString("MessageType") == "X")
+                            if (msg.GetString("MessageType") == "X") // инкрементальные
                             {
                                 bool needAddMsg = IsMessageMissed(_ordersIncremental, msgSeqNum, msg);
 
@@ -1858,10 +2147,13 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                 }
                             }
 
-                            if (msg.GetString("MessageType") == "4")
+                            if (msg.GetString("MessageType") == "4") // Sequence Reset
                             {
+                                long newSeqNo = msg.GetLong("NewSeqNo");
+
                                 _ordersSnapshotsMsgs.Clear();
-                                WriteLogOrders("Цикл снэпшотов ордеров закончился");
+
+                                WriteLogOrders($"Цикл снэпшотов ордеров закончился. Сокет {_socketsOrders[s].LocalEndPoint}. NewSeqNo: {newSeqNo}\n{msg}");
                             }
                         }
                     }
@@ -1892,6 +2184,12 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             {
                 try
                 {
+                    if (_isSessionOver)
+                    {
+                        Thread.Sleep(1);
+                        continue;
+                    }
+
                     if (_orderMessages.IsEmpty)
                     {
                         Thread.Sleep(1);
@@ -1929,68 +2227,78 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                                 int RptSeqFromOrder = groupVal.GetInt("RptSeq");
 
-                                // проверка пропуска даных по RptSeq и дублирования сообщений
-                                if (_orderNumsForCheckMissed[nameID].Find(n => n.RptSeq == RptSeqFromOrder) != null)
-                                    continue;
-
-                                _orderNumsForCheckMissed[nameID].Add(new NumbersMD { MsgSeqNum = msgSeqNum, RptSeq = RptSeqFromOrder });
-
                                 OrderChange newOrderChange = GetNewOrderChange(groupVal, nameID);
 
-                                // если новая заявка пришла из восстановленных, надо проверить, может её уже пытались удалить или изменить
-                                if (_stockChanges.ContainsKey(newOrderChange.NameID) && _stockChanges[newOrderChange.NameID].Count > 0)
+                                if (newOrderChange == null)
+                                    continue;
+
+                                // Уже пытались восстанавливать ордера. Безуспешно. Пропуски не проверяем
+                                if (_tryingConnectRecoveryOrdersCount < 6)
                                 {
-                                    //по востановленой заявке есть удаляющие или изменяющие ордера
-
-                                    OrderChange storedOrder;
-
-                                    do
-                                    {
-                                        storedOrder = _stockChanges[newOrderChange.NameID].Find(o => o.MDEntryID == newOrderChange.MDEntryID);
-
-                                        if (storedOrder != null && storedOrder.Action == OrderAction.Change)
-                                        {
-                                            newOrderChange.Volume = storedOrder.Volume;
-
-                                            _stockChanges[newOrderChange.NameID].Remove(storedOrder);
-                                        }
-                                        else if (storedOrder != null && storedOrder.Action == OrderAction.Delete)
-                                        {
-                                            newOrderChange.Volume = -1;
-
-                                            _stockChanges[newOrderChange.NameID].Remove(storedOrder);
-
-                                            break;
-                                        }
-
-                                    } while (storedOrder != null);
-
-                                    if (newOrderChange.Volume == -1)
+                                    // проверка пропуска даных по RptSeq и дублирования сообщений
+                                    if (_orderNumsForCheckMissed[nameID].Find(n => n.RptSeq == RptSeqFromOrder) != null)
                                         continue;
 
-                                }
+                                    _orderNumsForCheckMissed[nameID].Add(new NumbersMD { MsgSeqNum = msgSeqNum, RptSeq = RptSeqFromOrder });
 
-                                if (_endOfRecoveryOrders & _endOfRecoveryTrades)
-                                {
-                                    int missedRptSeqCount = 0;
-
-                                    bool missingOrdersData = IsDataMissed(_orderNumsForCheckMissed[nameID], out _missingOrdersBeginSeqNo, out _missingOrdersEndSeqNo, out missedRptSeqCount, out _missingOrdersRptSeqNums);
-
-                                    if (!_limitOrderReq && missedRptSeqCount >= 2 && missingOrdersData)
+                                    // если новая заявка пришла из восстановленных, надо проверить, может её уже пытались удалить или изменить
+                                    if (_stockChanges.ContainsKey(newOrderChange.NameID) && _stockChanges[newOrderChange.NameID].Count > 0)
                                     {
-                                        WriteLogOrders($"Требуется восстановление заявок в стакане по {_secNameById[nameID]}. Номера сообщений с {_missingOrdersBeginSeqNo} по {_missingOrdersEndSeqNo}. Количество пропущенных RptSeq: {missedRptSeqCount}.");
+                                        //по востановленой заявке есть удаляющие или изменяющие ордера
 
-                                        if (_historicalReplayEndPointForOrders == null)
-                                            CreateSocketConnections("Full orders log", "Historical Replay");
+                                        OrderChange storedOrder;
 
-                                        lock (_socketLockerHistoricalReplay)
+                                        do
                                         {
-                                            _endOfRecoveryOrders = false;
-                                        }
+                                            storedOrder = _stockChanges[newOrderChange.NameID].Find(o => o.MDEntryID == newOrderChange.MDEntryID);
+
+                                            if (storedOrder != null && storedOrder.Action == OrderAction.Change)
+                                            {
+                                                WriteLogOrders($"В хранилище найден изменяющий ордер MDEntryID: {storedOrder.MDEntryID}-RptSeq: {storedOrder.RptSeq} для нового ордера" +
+                                                    $"{newOrderChange.RptSeq}-Action: {newOrderChange.Action}-Type: {newOrderChange.OrderType}");
+
+
+                                                newOrderChange.Volume = storedOrder.Volume;
+
+                                                _stockChanges[newOrderChange.NameID].Remove(storedOrder);
+                                            }
+                                            else if (storedOrder != null && storedOrder.Action == OrderAction.Delete)
+                                            {
+                                                WriteLogOrders($"В хранилище найден удаляющий ордер MDEntryID: {storedOrder.MDEntryID}-RptSeq: {storedOrder.RptSeq} для нового ордера" +
+                                                  $"{newOrderChange.RptSeq}-Action: {newOrderChange.Action}-Type: {newOrderChange.OrderType}");
+
+                                                newOrderChange.Volume = -1;
+
+                                                _stockChanges[newOrderChange.NameID].Remove(storedOrder);
+
+                                                break;
+                                            }
+
+                                        } while (storedOrder != null);
+
+                                        if (newOrderChange.Volume == -1)
+                                            continue;
+
                                     }
 
-                                }
+                                    if (_endOfRecoveryOrders)
+                                    {
+                                        int missedRptSeqCount = 0;
 
+                                        _missingOrdersData = IsDataMissed(_orderNumsForCheckMissed[nameID], out _missingOrdersBeginSeqNo, out _missingOrdersEndSeqNo, out missedRptSeqCount, out _missingOrdersRptSeqNums);
+
+                                        if (!_limitOrderReq && missedRptSeqCount >= 2 && _missingOrdersData)
+                                        {
+                                            WriteLogOrders($"Требуется восстановление заявок в стакане по {_secNameById[nameID]}. Номера сообщений с {_missingOrdersBeginSeqNo} по {_missingOrdersEndSeqNo}. Количество пропущенных RptSeq: {missedRptSeqCount}.");
+
+                                            if (_historicalReplayEndPointForOrders == null)
+                                                CreateSocketConnections("Full orders log", "Historical Replay");
+
+                                            _endOfRecoveryOrders = false;
+                                        }
+
+                                    }
+                                }
                                 // храним минимальный номер обновления по инструменту
                                 if (_minRptSeqFromOrders.ContainsKey(nameID))
                                 {
@@ -2025,7 +2333,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                         // обработка и сразу в систему
                                         bool isUpdOrdersList = UpdateOrderData(nameID, newOrderChange);
 
-                                        if (isUpdOrdersList)
+                                        if (isUpdOrdersList && _depthChanges[nameID].Count > 0)
                                         {
                                             UpdateDepth(_depthChanges[nameID], nameID);
 
@@ -2155,7 +2463,15 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                     for (int j = 0; j < _waitingDepthChanges[nameID].Count; j++)
                                     {
                                         if (_waitingDepthChanges[nameID][j].RptSeq <= _ordersSnapshotsByName[nameID].RptSeq)
+                                        {
+                                            // удалить из списка для проверок пропуска
+                                            NumbersMD numbers = _orderNumsForCheckMissed[nameID].Find(o => o.RptSeq == _waitingDepthChanges[nameID][j].RptSeq);
+
+                                            if (numbers != null)
+                                                _orderNumsForCheckMissed[nameID].Remove(numbers);
+
                                             continue;
+                                        }
 
                                         UpdateOrderData(nameID, _waitingDepthChanges[nameID][j]);
                                     }
@@ -2224,6 +2540,8 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                     _ordersSnapshotSocketB = null;
                                 }
                                 WriteLogOrders("Сокеты снэпшотов закрыты");
+
+                                _ordersSnapshotsMsgs.Clear();
                             }
                         }
                         else if (fragment.LastFragment & _ordersSnapshotsByName[nameID].IsComletedSnapshot(_ordersSnapshotsByName[nameID].SnapshotFragments) == false)
@@ -2262,6 +2580,40 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             {
                 case "0": orderType = OrderType.Bid; break;
                 case "1": orderType = OrderType.Ask; break;
+                case "J":
+                    orderType = OrderType.EmptyBook;
+
+                    // FAST Docs 5.3.7. Полная очистка контейнера активных заявок
+                    SendLogMessage("Empty book! Cleaning orders", LogMessageType.Error);
+
+                    // снова ждём снэпшот, чистим фрагменты снэпшота и ожидающие ордера
+
+                    if (_foBook20SnapshotSocketA == null && _foBook20SnapshotSocketB == null)
+                        CreateSocketConnections("Top 20 price levels", "Snapshot");
+
+                    _ordersSnapshotsByName[nameID].SnapshotFragments.Clear();
+                    _waitingDepthChanges[nameID].Clear();
+
+                    _ordersSnapshotsByName[nameID].SnapshotWasApplied = false;
+
+                    SendLogMessage("Обнуляем стакан", LogMessageType.System);
+
+                    _foBook20AggDepths[nameID].Asks.Clear();
+
+                    _foBook20AggDepths[nameID].Bids.Clear();
+
+                    for (int j = 0; j < 20; j++)
+                    {
+                        _foBook20AggDepths[nameID].Asks.Add(new MarketDepthLevel() { Id = j + 1, Price = 1, Ask = 1 });
+
+                        _foBook20AggDepths[nameID].Bids.Add(new MarketDepthLevel() { Id = j + 1, Price = 1, Bid = 1 });
+                    }
+
+                    _foBook20AggDepths[nameID].Time = DateTime.Now;
+
+                    return null;
+
+
                 default: orderType = OrderType.None; break;
             }
 
@@ -2280,8 +2632,17 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                 default: action = OrderAction.None; break;
             }
 
+            string id = "";
+
+            if (groupVal.TryGetValue("MDEntryID", out IFieldValue fieldID) && fieldID != null)
+                id = fieldID.ToString();
+
+            int priceLevel = 0;
+
+            if (groupVal.TryGetValue("MDPriceLevel", out IFieldValue fieldLevel) && fieldLevel != null)
+                priceLevel = (fieldLevel as ScalarValue).ToInt();
+
             double price = groupVal.GetString("MDEntryPx").ToDouble();
-            string id = groupVal.GetString("MDEntryID");
             double volume = groupVal.GetString("MDEntrySize").ToDouble();
 
             newOrderChange.NameID = nameID;
@@ -2291,6 +2652,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             newOrderChange.Action = action;
             newOrderChange.RptSeq = RptSeqFromOrder;
             newOrderChange.Volume = volume;
+            newOrderChange.PriceLevel = Convert.ToInt32(priceLevel);
 
             return newOrderChange;
         }
@@ -2326,8 +2688,8 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             {
                 asks.Add(new MarketDepthLevel()
                 {
-                    Price = Convert.ToDouble(levelAsk.Current.Key),
-                    Ask = Convert.ToDouble(levelAsk.Current.Value)
+                    Price = levelAsk.Current.Key,
+                    Ask = levelAsk.Current.Value
                 });
             }
 
@@ -2355,8 +2717,8 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             {
                 bids.Add(new MarketDepthLevel()
                 {
-                    Price = Convert.ToDouble(levelBid.Current.Key),
-                    Bid = Convert.ToDouble(levelBid.Current.Value)
+                    Price = levelBid.Current.Key,
+                    Bid = levelBid.Current.Value
                 });
             }
 
@@ -2365,7 +2727,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
             if (nullAsks.Count > 0)
             {
-                for (int i = 0; nullAsks.Count > 0; i++)
+                for (int i = 0; i < nullAsks.Count; i++)
                 {
                     asks.Remove(nullAsks[i]);
                 }
@@ -2375,7 +2737,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
             if (nullBids.Count > 0)
             {
-                for (int i = 0; nullBids.Count > 0; i++)
+                for (int i = 0; i < nullBids.Count; i++)
                 {
                     bids.Remove(nullBids[i]);
                 }
@@ -2383,6 +2745,23 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
             marketDepth.Asks = asks;
             marketDepth.Bids = bids;
+
+            // Проверка активности уровней стакана
+            if (_missingOrdersData)
+            {
+                if (_controlDepths[NameID].BidsF.Count == 0 && _controlDepths[NameID].AsksF.Count == 0)
+                {
+                    for (int i = 0; i < 5; i++)
+                    {
+                        _controlDepths[NameID].BidsF.Add(new ControlDepthLevel() { Bid = marketDepth.Bids[i].Bid, Price = marketDepth.Bids[i].Price });
+                        _controlDepths[NameID].AsksF.Add(new ControlDepthLevel() { Ask = marketDepth.Asks[i].Ask, Price = marketDepth.Asks[i].Price });
+                    }
+                }
+                else
+                {
+                    RemoveInactiveLevels(_controlDepths[NameID], marketDepth, NameID);
+                }
+            }
 
             // удаляем лишние уровни
             const int maxCount = 25;
@@ -2402,21 +2781,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
             _lastMdTime = marketDepth.Time;
 
-            // Проверка активности уровней стакана
-
-            if (_controlDepths[NameID].BidsF.Count == 0 && _controlDepths[NameID].AsksF.Count == 0)
-            {
-                for (int i = 0; i < 5; i++)
-                {
-                    _controlDepths[NameID].BidsF.Add(new ControlDepthLevel() { Bid = marketDepth.Bids[i].Bid, Price = marketDepth.Bids[i].Price });
-                    _controlDepths[NameID].AsksF.Add(new ControlDepthLevel() { Ask = marketDepth.Asks[i].Ask, Price = marketDepth.Asks[i].Price });
-                }
-            }
-            else
-            {
-                RemoveInactiveLevels(_controlDepths[NameID], marketDepth, NameID);
-            }
-
             MarketDepthEvent(marketDepth);
         }
 
@@ -2429,9 +2793,8 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             {
                 if (sourceDepth.Bids[i].Bid == controlDepth.BidsF[i].Bid)
                 {
-                    controlDepth.BidsF[i].ImmutabilityCount++;
 
-                    if (controlDepth.BidsF[i].ImmutabilityCount == 500) // стакан обновился 500 раз, а уровень нет
+                    if (controlDepth.BidsF[i].ImmutabilityTime.AddSeconds(60) < DateTime.Now) // стакан обновился 500 раз, а уровень нет
                     {
                         inactiveBids.Add(controlDepth.BidsF[i]);
 
@@ -2440,10 +2803,12 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                         i--;
                     }
+
                 }
                 else
                 {
-                    controlDepth.BidsF[i].ImmutabilityCount = 0;
+
+                    controlDepth.BidsF[i].ImmutabilityTime = DateTime.Now;
 
                     controlDepth.BidsF[i].Bid = sourceDepth.Bids[i].Bid;
                     controlDepth.BidsF[i].Price = sourceDepth.Bids[i].Price;
@@ -2460,12 +2825,10 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
             for (int i = 0; i < controlDepth.AsksF.Count; i++) // проверяем 5 уровней аск, изменились ли они с прошлого обновления стакана
             {
-                if (sourceDepth.Asks[i].Ask == controlDepth.AsksF[i].Ask && sourceDepth.Asks[i].Price == controlDepth.AsksF[i].Price)
+                if (sourceDepth.Asks[i].Ask == controlDepth.AsksF[i].Ask)
                 {
 
-                    controlDepth.AsksF[i].ImmutabilityCount++;
-
-                    if (controlDepth.AsksF[i].ImmutabilityCount == 500)
+                    if (controlDepth.AsksF[i].ImmutabilityTime.AddSeconds(60) < DateTime.Now)
                     {
                         inactiveAsks.Add(controlDepth.AsksF[i]);
 
@@ -2478,7 +2841,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                 }
                 else
                 {
-                    controlDepth.AsksF[i].ImmutabilityCount = 0;
+                    controlDepth.AsksF[i].ImmutabilityTime = DateTime.Now;
 
                     controlDepth.AsksF[i].Ask = sourceDepth.Asks[i].Ask;
                     controlDepth.AsksF[i].Price = sourceDepth.Asks[i].Price;
@@ -2500,19 +2863,54 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                     int inactiveOrders = _depthChanges[NameID].RemoveAll(o => o.OrderType == OrderType.Ask && o.Price == inactiveAsks[i].Price);
 
                     if (inactiveOrders > 0)
+                    {
                         WriteLogOrders($"Удалено {inactiveOrders} не активных заявок Ask по инструменту: {_secNameById[NameID]} по цене {inactiveAsks[i].Price}");
+
+                        string newLevs = $"Удалено {inactiveOrders} не активных заявок Ask по инструменту: {_secNameById[NameID]} по цене {inactiveAsks[i].Price}";
+
+
+                        SendLogMessage(newLevs, LogMessageType.Error);
+
+                    }
                 }
+
+                string newAsks = $"Обновленные уровни:\n";
+
+
+                for (int j = 5; j >= 0; j--)
+                {
+                    newAsks += $"[ {sourceDepth.Asks[j].Price} ] [ {sourceDepth.Asks[j].Ask} ]\n";
+                }
+
+                SendLogMessage(newAsks, LogMessageType.Error);
+
             }
 
             if (inactiveBids.Count > 0)
             {
                 for (int i = 0; i < inactiveBids.Count; i++)
                 {
-                    int inactiveOrders = _depthChanges[NameID].RemoveAll(o => o.OrderType == OrderType.Ask && o.Price == inactiveBids[i].Price);
+                    int inactiveOrders = _depthChanges[NameID].RemoveAll(o => o.OrderType == OrderType.Bid && o.Price == inactiveBids[i].Price);
 
                     if (inactiveOrders > 0)
+                    {
                         WriteLogOrders($"Удалено {inactiveOrders} не активных заявок Bid по инструменту: {_secNameById[NameID]} по цене {inactiveBids[i].Price}");
+
+                        string newLevs = $"Удалено {inactiveOrders} не активных заявок Bid по инструменту: {_secNameById[NameID]} по цене {inactiveBids[i].Price}";
+
+
+                        SendLogMessage(newLevs, LogMessageType.Error);
+                    }
                 }
+
+                string newBids = $"Обновленные уровни:\n";
+
+                for (int j = 0; j < 5; j++)
+                {
+                    newBids += $"[ {sourceDepth.Bids[j].Price} ] [ {sourceDepth.Bids[j].Bid} ]\n";
+                }
+
+                SendLogMessage(newBids, LogMessageType.Error);
             }
         }
 
@@ -2829,7 +3227,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                     _nextTwimeMsgNum++;
 
-                    SendLogMessage($"EmtyBook message received.", LogMessageType.System);
+                    SendLogMessage($"EmtyBook message received (TWIME).", LogMessageType.System);
                     break;
 
                 case 7014:  // SystemEvent
@@ -2837,7 +3235,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                     _nextTwimeMsgNum++;
 
                     byte TradSesEvent = bufferMsg[28];
-                    SendLogMessage($"System Event message received. Event type: {TradSesEvent}", LogMessageType.System);
+                    SendLogMessage($"System Event message received. Event type: {TradSesEvent} (TWIME)", LogMessageType.System);
 
                     break;
 
@@ -2871,7 +3269,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                     }
                     else
                     {
-                        SendLogMessage("The receipt of the order report failed with an error", LogMessageType.Error);
+                        SendLogMessage($"The receipt of the order report failed with an error\n{ordReport.ParseError}", LogMessageType.Error);
                     }
 
                     break;
@@ -3495,10 +3893,10 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                     lock (_socketLockerHistoricalReplay)
                     {
                         bool ordersRecoveryNeed = _historicalReplayEndPointForOrders != null && _missingOrdersBeginSeqNo > 0
-                            && _missingOrdersRptSeqNums.Count >= 2 && _tryingConnectRecoveryOrdersCount != 10;
+                            && _missingOrdersRptSeqNums.Count >= 2 && _tryingConnectRecoveryOrdersCount != 6;
 
                         bool tradesRecoveryNeed = _historicalReplayEndPointForTrades != null && _missingTradesBeginSeqNo > 0
-                            && _missingTradesRptSeqNums.Count >= 2 && _tryingConnectRecoveryTradesCount != 10;
+                            && _missingTradesRptSeqNums.Count >= 2 && _tryingConnectRecoveryTradesCount != 6;
 
                         // проверяем нужно ли восстанавливать какие-либо данные
                         if (ordersRecoveryNeed)
@@ -3511,6 +3909,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                             }
                             // восстанавливаем данные из потока ордеров
                             WriteLogRecovery($"Попытка восстановить пропущенные сообщения по ордерам: {_missingOrdersBeginSeqNo}-{_missingOrdersEndSeqNo}");
+                            SendLogMessage($"Попытка восстановить {_missingOrdersRptSeqNums.Count} пропущенных сообщений по ордерам, диапазон FAST сообщений: {_missingOrdersBeginSeqNo}-{_missingOrdersEndSeqNo}", LogMessageType.Trade);
 
                         }
                         else
@@ -3524,6 +3923,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                             }
                             // восстанавливаем данные из потока сделок
                             WriteLogRecovery($"Попытка восстановить пропущенные сообщения по трейдам: {_missingTradesBeginSeqNo}-{_missingTradesEndSeqNo}");
+                            SendLogMessage($"Попытка восстановить {_missingTradesRptSeqNums.Count} пропущенных сообщений по трейдам, диапазон FAST сообщений: {_missingTradesBeginSeqNo}-{_missingTradesEndSeqNo}", LogMessageType.Trade);
                         }
                         else
                         {
@@ -3542,7 +3942,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                             if (ordersRecoveryNeed)
                             {
                                 // было по 5 попыток подключения к серверам восстановления сообщений ORDERS-LOG
-                                if (_tryingConnectRecoveryOrdersCount == 10)
+                                if (_tryingConnectRecoveryOrdersCount == 6)
                                 {
                                     Thread.Sleep(100);
                                     continue;
@@ -3560,7 +3960,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                             else if (tradesRecoveryNeed)
                             {
                                 // было по 5 попыток подключения к серверам восстановления сообщений FO-TRADES
-                                if (_tryingConnectRecoveryTradesCount == 10)
+                                if (_tryingConnectRecoveryTradesCount == 6)
                                 {
                                     Thread.Sleep(100);
                                     continue;
@@ -3587,7 +3987,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                                 _tryingConnectRecoveryOrdersCount++;
 
-                                if (_tryingConnectRecoveryOrdersCount == 5 && !_isTryingConnectToOrdersReserveIP)
+                                if (_tryingConnectRecoveryOrdersCount == 3 && !_isTryingConnectToOrdersReserveIP)
                                 {
                                     SendLogMessage($"Не удалось подключиться к серверу восстановления ордеров. " +
                                         $"Подключаюсь к резервному: {_historicalReplayEndPointForOrdersReserve}.\n" + ex.Message, LogMessageType.Error);
@@ -3595,13 +3995,15 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                                     _isTryingConnectToOrdersReserveIP = true;
                                 }
-                                else if (_tryingConnectRecoveryOrdersCount == 10 && _isTryingConnectToOrdersReserveIP)
+                                else if (_tryingConnectRecoveryOrdersCount == 6 && _isTryingConnectToOrdersReserveIP)
                                 {
                                     SendLogMessage($"Не удалось подключиться к резервному серверу восстановления ордеров. " +
                                         $"Проверьте подключение.\n" + ex.Message, LogMessageType.Error);
+
+                                    _endOfRecoveryOrders = true;
                                 }
 
-                                Thread.Sleep(3000);
+                                Thread.Sleep(2000);
                                 continue;
                             }
                             else if (tradesRecoveryNeed)
@@ -3610,7 +4012,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                                 _tryingConnectRecoveryTradesCount++;
 
-                                if (_tryingConnectRecoveryTradesCount == 5 && !_isTryingConnectToOrdersReserveIP)
+                                if (_tryingConnectRecoveryTradesCount == 3 && !_isTryingConnectToOrdersReserveIP)
                                 {
                                     SendLogMessage($"Не удалось подключиться к серверу восстановления трейдов. " +
                                         $"Подключаюсь к резервному: {_historicalReplayEndPointForTradesReserve}.\n" + ex.Message, LogMessageType.Error);
@@ -3618,10 +4020,12 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                                     _isTryingConnectToTradesReserveIP = true;
                                 }
-                                else if (_tryingConnectRecoveryTradesCount == 10 && _isTryingConnectToTradesReserveIP)
+                                else if (_tryingConnectRecoveryTradesCount == 6 && _isTryingConnectToTradesReserveIP)
                                 {
                                     SendLogMessage($"Не удалось подключиться к серверу восстановления трейдов. " +
                                         $"Проверьте подключение.\n" + ex.Message, LogMessageType.Error);
+
+                                    _endOfRecoveryTrades = true;
                                 }
 
                                 Thread.Sleep(3000);
@@ -3644,13 +4048,16 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                         }
                         catch (Exception ex)
                         {
-                            SendLogMessage("Error receiving Data " + ex.ToString(), LogMessageType.Error);
+                            SendLogMessage("Error first receiving length msg\n" + ex.ToString(), LogMessageType.Error);
 
-                            if (ServerStatus != ServerConnectStatus.Disconnect)
-                            {
-                                ServerStatus = ServerConnectStatus.Disconnect;
-                                DisconnectEvent();
-                            }
+                            Thread.Sleep(300);
+                            return;
+
+                            //if (ServerStatus != ServerConnectStatus.Disconnect)
+                            //{
+                            //    ServerStatus = ServerConnectStatus.Disconnect;
+                            //    DisconnectEvent();
+                            //}
                         }
 
                         while (length < 4)
@@ -3661,12 +4068,16 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                             }
                             catch (Exception ex)
                             {
-                                SendLogMessage("Error receiving Data Message " + ex.ToString(), LogMessageType.Error);
-                                if (ServerStatus != ServerConnectStatus.Disconnect)
-                                {
-                                    ServerStatus = ServerConnectStatus.Disconnect;
-                                    DisconnectEvent();
-                                }
+                                SendLogMessage("Error receiving length msg\n" + ex.ToString(), LogMessageType.Error);
+
+                                Thread.Sleep(300);
+                                return;
+
+                                //if (ServerStatus != ServerConnectStatus.Disconnect)
+                                //{
+                                //    ServerStatus = ServerConnectStatus.Disconnect;
+                                //    DisconnectEvent();
+                                //}
                             }
                         }
 
@@ -3683,12 +4094,16 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                             }
                             catch (Exception ex)
                             {
-                                SendLogMessage("Error receiving Data Message " + ex.ToString(), LogMessageType.Error);
-                                if (ServerStatus != ServerConnectStatus.Disconnect)
-                                {
-                                    ServerStatus = ServerConnectStatus.Disconnect;
-                                    DisconnectEvent();
-                                }
+                                SendLogMessage("Error receiving Message Type\n" + ex.ToString(), LogMessageType.Error);
+
+                                Thread.Sleep(300);
+                                return;
+
+                                //if (ServerStatus != ServerConnectStatus.Disconnect)
+                                //{
+                                //    ServerStatus = ServerConnectStatus.Disconnect;
+                                //    DisconnectEvent();
+                                //}
                             }
 
                             Array.Copy(buffer, 0, messageBuffer, totalBytesReceived, bytesRead);
@@ -3749,28 +4164,36 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                             }
                             catch (Exception ex)
                             {
-                                SendLogMessage("Error receiving Data Message " + ex.ToString(), LogMessageType.Error);
-                                if (ServerStatus != ServerConnectStatus.Disconnect)
-                                {
-                                    ServerStatus = ServerConnectStatus.Disconnect;
-                                    DisconnectEvent();
-                                }
+                                SendLogMessage("Error receiving second length msg/n" + ex.ToString(), LogMessageType.Error);
+
+                                Thread.Sleep(300);
+                                return;
+
+                                //if (ServerStatus != ServerConnectStatus.Disconnect)
+                                //{
+                                //    ServerStatus = ServerConnectStatus.Disconnect;
+                                //    DisconnectEvent();
+                                //}
                             }
 
                             while (length < 4)
                             {
                                 try
                                 {
-                                    length += _historicalReplaySocket.Receive(sizeBuffer, length, 4 - length, SocketFlags.None);
+                                    length += _historicalReplaySocket.Receive(sizeBuffer, length, 4 - length, SocketFlags.None); // есть разрыв связи  
                                 }
                                 catch (Exception ex)
                                 {
-                                    SendLogMessage("Error receiving Data Message " + ex.ToString(), LogMessageType.Error);
-                                    if (ServerStatus != ServerConnectStatus.Disconnect)
-                                    {
-                                        ServerStatus = ServerConnectStatus.Disconnect;
-                                        DisconnectEvent();
-                                    }
+                                    SendLogMessage("Error receiving length base message\n" + ex.ToString(), LogMessageType.Error);
+
+                                    Thread.Sleep(300);
+                                    return;
+
+                                    //if (ServerStatus != ServerConnectStatus.Disconnect)
+                                    //{
+                                    //    ServerStatus = ServerConnectStatus.Disconnect;
+                                    //    DisconnectEvent();
+                                    //}
                                 }
                             }
 
@@ -3788,12 +4211,16 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                 }
                                 catch (Exception ex)
                                 {
-                                    SendLogMessage("Error receiving Data Message " + ex.ToString(), LogMessageType.Error);
-                                    if (ServerStatus != ServerConnectStatus.Disconnect)
-                                    {
-                                        ServerStatus = ServerConnectStatus.Disconnect;
-                                        DisconnectEvent();
-                                    }
+                                    SendLogMessage("Error receiving Base Message\n" + ex.ToString(), LogMessageType.Error);
+
+                                    Thread.Sleep(300);
+                                    return;
+
+                                    //if (ServerStatus != ServerConnectStatus.Disconnect)
+                                    //{
+                                    //    ServerStatus = ServerConnectStatus.Disconnect;
+                                    //    DisconnectEvent();
+                                    //}
                                 }
 
                                 Array.Copy(buffer, 0, messageBuffer, totalBytesReceived, bytesRead);
@@ -3809,11 +4236,11 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                     FastDecoder decoder = new FastDecoder(context, stream);
                                     msg = decoder.ReadMessage();
                                 }
-                                catch (NullReferenceException)
+                                catch (NullReferenceException ex)
                                 {
                                     // в редких случаях исключение возникает в самой библиотеке OpenFast
                                 }
-                                catch (Exception)
+                                catch (Exception ex)
                                 {
                                     // Иногда просто что-то глючит, но он все равно читает сообщение
                                 }
@@ -3900,9 +4327,9 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                     // закрываем сокет
                                     _historicalReplaySocket.Close();
                                     _historicalReplaySocket = null;
-                                    _tryingConnectRecoveryOrdersCount = 0;
+                                    _tryingConnectRecoveryOrdersCount = 1;
                                     _isTryingConnectToOrdersReserveIP = false;
-                                    _tryingConnectRecoveryTradesCount = 0;
+                                    _tryingConnectRecoveryTradesCount = 1;
                                     _isTryingConnectToTradesReserveIP = false;
 
                                     break;
@@ -3931,7 +4358,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
         public event Action<Trade> NewTradesEvent;
 
-        public event Action<OptionMarketDataForConnector> AdditionalMarketDataEvent { add { } remove { } }
+        public event Action<OptionMarketDataForConnector> AdditionalMarketDataEvent;
 
         #endregion
 
@@ -4033,6 +4460,8 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                 SendLogMessage("Order send error " + ex.ToString(), LogMessageType.Error);
             }
         }
+
+        int _countTest = 0;
 
         public bool CancelOrder(Order order)
         {
@@ -4211,9 +4640,11 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
         // переменные для сертификации
 
-        /*string _secType = string.Empty;
+
+
+        string _secType = string.Empty;
         byte F = 1;
-        byte O = 2;*/
+        byte O = 2;
 
         public void CancelAllOrders()
         {
@@ -4373,6 +4804,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             return null;
         }
 
+
         #endregion
 
         #region 10 Helpers
@@ -4530,21 +4962,22 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             return context;
         }
 
+
         #endregion
 
         #region 11 Log
 
         private string _logLockTrade = "locker for trades stream ";
-        private StreamWriter _logFileTrades = new StreamWriter($"Engine\\Log\\MoexFixFastTwimeConnectorLogs\\FAST_Trades_{DateTime.Now:dd-MM-yyyy}.txt");
+        private StreamWriter _logFileTrades = new StreamWriter($"Engine\\Log\\MoexFixFastTwimeConnectorLogs\\FAST_Trades_{DateTime.Now:dd-MM-yyyy}.txt", true);
 
         private string _logLockOrder = "locker for orders stream";
-        private StreamWriter _logFileOrders = new StreamWriter($"Engine\\Log\\MoexFixFastTwimeConnectorLogs\\FAST_Orders_{DateTime.Now:dd-MM-yyyy}.txt");
+        private StreamWriter _logFileOrders = new StreamWriter($"Engine\\Log\\MoexFixFastTwimeConnectorLogs\\FAST_Orders_{DateTime.Now:dd-MM-yyyy}.txt", true);
 
         private string _logLockTrading = "locker for incoming trade messages";
-        private StreamWriter _logTradingMsg = new StreamWriter($"Engine\\Log\\MoexFixFastTwimeConnectorLogs\\TradingServerLog_{DateTime.Now:dd-MM-yyyy}.txt", false, Encoding.UTF8);
+        private StreamWriter _logTradingMsg = new StreamWriter($"Engine\\Log\\MoexFixFastTwimeConnectorLogs\\TradingServerLog_{DateTime.Now:dd-MM-yyyy}.txt", true, Encoding.UTF8);
 
         private string _logLockRecover = "locker for Recover";
-        private StreamWriter _logFileRecover = new StreamWriter($"Engine\\Log\\MoexFixFastTwimeConnectorLogs\\DataRecoveryLog_{DateTime.Now:dd-MM-yyyy}.txt");
+        private StreamWriter _logFileRecover = new StreamWriter($"Engine\\Log\\MoexFixFastTwimeConnectorLogs\\DataRecoveryLog_{DateTime.Now:dd-MM-yyyy}.txt", true);
 
         private void WriteLogTrades(string message)
         {
@@ -4572,10 +5005,10 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
         private void WriteLogRecovery(string message)
         {
-            lock (_logLockRecover)
-            {
-                _logFileRecover.WriteLine($"{DateTime.Now}: {message}");
-            }
+            // lock (_logLockRecover)
+            // {
+            _logFileRecover.WriteLine($"{DateTime.Now}: {message}");
+
         }
 
         private string PrintOrderReport(Order order)
@@ -4602,9 +5035,9 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
         public event Action<string, LogMessageType> LogMessageEvent;
 
-        public event Action<Funding> FundingUpdateEvent { add { } remove { } }
+        public event Action<Funding> FundingUpdateEvent;
 
-        public event Action<SecurityVolumes> Volume24hUpdateEvent { add { } remove { } }
+        public event Action<SecurityVolumes> Volume24hUpdateEvent;
 
         private void SendLogMessage(string message, LogMessageType messageType)
         {
@@ -4612,5 +5045,791 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
         }
 
         #endregion
+
+        #region FO-BOOK
+
+        private ConcurrentQueue<OpenFAST.Message> _foBook20MessagesQueue = new ConcurrentQueue<OpenFAST.Message>();
+        Dictionary<string, MarketDepth> _foBook20AggDepths = new Dictionary<string, MarketDepth>();
+
+        Dictionary<long, OpenFAST.Message> _foBook20IncrementalMsgs = new Dictionary<long, OpenFAST.Message>();
+        Dictionary<long, OpenFAST.Message> _foBook20SnapshotsMsgs = new Dictionary<long, OpenFAST.Message>();
+
+        private void GetFastMessagesFoBook20()
+        {
+            byte[] buffer = new byte[4096];
+            OpenFAST.Context context = null;
+
+            Thread.Sleep(1000);
+
+            while (true)
+            {
+                try
+                {
+                    if (_foBook20IncrementalSocketA == null || _foBook20IncrementalSocketB == null)
+                    {
+                        Thread.Sleep(1);
+                        continue;
+                    }
+
+                    if (ServerStatus == ServerConnectStatus.Disconnect)
+                    {
+                        Thread.Sleep(1);
+                        continue;
+                    }
+
+                    // если долго не получаем данные, отключаемся
+                    if (_timeLastDataReceipt.AddMinutes(5) < DateTime.Now)
+                    {
+                        SendLogMessage("There has been no data on orders for too long!", LogMessageType.Error);
+                        if (ServerStatus != ServerConnectStatus.Disconnect)
+                        {
+                            ServerStatus = ServerConnectStatus.Disconnect;
+                            DisconnectEvent();
+                        }
+                    }
+
+                    if (context == null)
+                    {
+                        context = CreateNewContext();
+                    }
+
+                    for (int s = 0; s < _socketsFoBook20.Count; s++)
+                    {
+                        int length = 0;
+                        try
+                        {
+                            lock (_socketLockerOrdersIncremental)
+                            {
+                                if (_foBook20IncrementalSocketA == null || _foBook20IncrementalSocketB == null)
+                                {
+                                    continue;
+                                }
+
+                                length = _socketsFoBook20[s].Receive(buffer);
+                            }
+                        }
+                        catch (SocketException exception)
+                        {
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            SendLogMessage("Error receiving FAST Message " + ex.ToString(), LogMessageType.Error);
+                            if (ServerStatus != ServerConnectStatus.Disconnect)
+                            {
+                                ServerStatus = ServerConnectStatus.Disconnect;
+                                DisconnectEvent();
+                            }
+                        }
+
+                        if (length == 0)
+                            continue;
+
+                        _timeLastDataReceipt = DateTime.Now;
+
+                        using (MemoryStream stream = new MemoryStream(buffer, 4, length))
+                        {
+                            FastDecoder decoder = new FastDecoder(context, stream);
+
+                            OpenFAST.Message msg = decoder.ReadMessage();
+
+                            long msgSeqNum = msg.GetLong("MsgSeqNum");
+
+                            if (msg.GetString("MessageType") == "W") // снэпшоты
+                            {
+                                string nameID = msg.GetString("SecurityID");
+
+                                bool needAddMsg = IsMessageMissed(_foBook20SnapshotsMsgs, msgSeqNum, msg);
+
+                                if (needAddMsg)
+                                {
+                                    if (IsSubscribedToThisSecurity(nameID))
+                                        _foBook20MessagesQueue.Enqueue(msg);
+                                }
+                            }
+
+                            if (msg.GetString("MessageType") == "X") // инкрементальные
+                            {
+                                bool needAddMsg = IsMessageMissed(_foBook20IncrementalMsgs, msgSeqNum, msg);
+
+                                if (needAddMsg) // если предыдущего сообщения с таким номером не было
+                                {
+                                    if (msg.IsDefined("MDEntries"))
+                                    {
+                                        SendMsgToQueue(msg, _foBook20MessagesQueue);
+                                    }
+                                }
+
+                                if (_foBook20IncrementalMsgs.Count > 10000)
+                                {
+                                    for (long i = msgSeqNum - 5000; i > 1; i--)
+                                    {
+                                        _foBook20IncrementalMsgs.Remove(i);
+                                    }
+
+                                    SendLogMessage($"FAST сообщений fo-book: {_foBook20IncrementalMsgs.Count}", LogMessageType.System);
+                                }
+                            }
+
+                            if (msg.GetString("MessageType") == "4") // Sequence Reset
+                            {
+                                long newSeqNo = msg.GetLong("NewSeqNo");
+
+                                _foBook20SnapshotsMsgs.Clear();
+
+                                WriteLogOrders($"Цикл снэпшотов книги закончился. Сокет {_socketsFoBook20[s].LocalEndPoint}. NewSeqNo: {newSeqNo}\n{msg}");
+                            }
+                        }
+                    }
+                }
+                catch (IndexOutOfRangeException exception)
+                {
+                    SendLogMessage(exception.ToString(), LogMessageType.Error);
+
+                    _foBook20SnapshotsMsgs.Clear();
+                    _foBook20IncrementalMsgs.Clear();
+                    continue;
+
+                }
+                catch (Exception exception)
+                {
+                    SendLogMessage(exception.ToString(), LogMessageType.Error);
+                    Thread.Sleep(5000);
+                }
+            }
+        }
+
+        private void FoBook20MessagesReader()
+        {
+            Thread.Sleep(1000);
+
+            while (true)
+            {
+                try
+                {
+                    if (_isSessionOver)
+                    {
+                        Thread.Sleep(1);
+                        continue;
+                    }
+
+                    if (_foBook20MessagesQueue.IsEmpty)
+                    {
+                        Thread.Sleep(1);
+                        continue;
+                    }
+
+                    OpenFAST.Message msg;
+
+                    // в этой очереди снэпшоты и уровни стаканов по подписанным инструментам
+                    _foBook20MessagesQueue.TryDequeue(out msg);
+
+                    if (msg == null)
+                    {
+                        continue;
+                    }
+
+                    string msgType = msg.GetString("MessageType");
+                    long msgSeqNum = msg.GetLong("MsgSeqNum");
+
+                    if (msgType == "X") // инкрементальные данные
+                    {
+                        if (msg.IsDefined("MDEntries"))
+                        {
+                            SequenceValue secVal = msg.GetValue("MDEntries") as SequenceValue;
+
+                            for (int i = 0; i < secVal.Length; i++)
+                            {
+                                GroupValue groupVal = secVal[i] as GroupValue;
+
+                                string nameID = groupVal.GetString("SecurityID");
+                                string id = groupVal.GetString("MDEntryID");
+
+                                if (!IsSubscribedToThisSecurity(nameID)) // если не подписаны на этот инструмент, ордер не берем
+                                    continue;
+
+                                int RptSeqFromOrder = groupVal.GetInt("RptSeq");
+
+                                OrderChange newOrderChange = GetNewOrderChange(groupVal, nameID);
+
+                                if (newOrderChange == null)
+                                    continue;
+
+                                // храним минимальный номер обновления по инструменту
+                                if (_minRptSeqFromOrders.ContainsKey(nameID))
+                                {
+                                    if (_minRptSeqFromOrders[nameID] > RptSeqFromOrder)
+                                    {
+                                        _minRptSeqFromOrders[nameID] = RptSeqFromOrder;
+                                    }
+                                }
+                                else
+                                {
+                                    _minRptSeqFromOrders.Add(nameID, RptSeqFromOrder);
+                                }
+
+
+                                if (_ordersSnapshotsByName.ContainsKey(nameID))
+                                {
+                                    if (!_ordersSnapshotsByName[nameID].SnapshotWasApplied)
+                                    {
+                                        // пока снэпшот не применен, изменения заявок складываем в ожидающие
+                                        _waitingDepthChanges[nameID].Add(newOrderChange);
+
+                                        WriteLogOrders($"Изменение ценового уровня в ОЖИДАЮЩИЕ: MsgSeqNum: {msgSeqNum}, " +
+                                            $"RptSeq: {RptSeqFromOrder}, Инструмент: {_secNameById[nameID]}, " +
+                                            $"Уровень: {newOrderChange.PriceLevel}, Действие: {newOrderChange.Action}, " +
+                                            $"Type: {newOrderChange.OrderType}, Цена: {newOrderChange.Price}, Объем: {newOrderChange.Volume}");
+                                    }
+                                    else
+                                    {
+                                        if (newOrderChange.RptSeq <= _ordersSnapshotsByName[nameID].RptSeq)
+                                            continue;
+
+
+                                        // экспериментальное обнуление стакана и перезапуск
+
+                                        //if (_mdTimeStart.AddMinutes(5) < DateTime.Now)
+                                        //{
+                                        //    SendLogMessage("Обнуляем стакан", LogMessageType.Error);
+
+                                        //    _foBook20AggDepths[nameID].Asks.Clear();
+
+                                        //    _foBook20AggDepths[nameID].Bids.Clear();
+
+                                        //    for (int j = 0; j < 20; j++)
+                                        //    {
+                                        //        _foBook20AggDepths[nameID].Asks.Add(new MarketDepthLevel() { Id = j + 1, Price = 1, Ask = 1 });
+
+                                        //        _foBook20AggDepths[nameID].Bids.Add(new MarketDepthLevel() { Id = j + 1, Price = 1, Bid = 1 });
+                                        //    }
+
+                                        //    _foBook20AggDepths[nameID].Time = DateTime.Now;
+
+                                        //    // снова ждём снэпшот, чистим фрагменты снэпшота и ожидающие ордера
+
+                                        //    if (_foBook20SnapshotSocketA == null && _foBook20SnapshotSocketB == null)
+                                        //        CreateSocketConnections("Top 20 price levels", "Snapshot");
+
+                                        //    _ordersSnapshotsByName[nameID].SnapshotFragments.Clear();
+                                        //    _waitingDepthChanges[nameID].Clear();
+
+                                        //    _ordersSnapshotsByName[nameID].SnapshotWasApplied = false;
+
+                                        //    _mdTimeStart = DateTime.Now.AddMinutes(6);
+
+                                        //    MDPrint(nameID);
+                                        //}
+                                        //else
+                                        //{
+                                        UpdateAggDepth(_foBook20AggDepths[nameID], newOrderChange, nameID);
+                                        // }
+
+                                        MarketDepthEvent(_foBook20AggDepths[nameID]);
+
+                                        WriteLogOrders($"Изменение ценового уровня. СТАКАН ОБНОВЛЕН: MsgSeqNum: {msgSeqNum}, " +
+                                            $"RptSeq: {RptSeqFromOrder}, Инструмент: {_secNameById[nameID]}, " +
+                                             $"Уровень: {newOrderChange.PriceLevel}, Действие: {newOrderChange.Action}, " +
+                                        $"Type: {newOrderChange.OrderType}, Цена: {newOrderChange.Price}, Объем: {newOrderChange.Volume}");
+
+                                    }
+                                }
+
+                            }
+                        }
+                    }
+
+                    if (msgType == "W") // снэпшот
+                    {
+                        string nameID = msg.GetString("SecurityID");
+
+                        if (_ordersSnapshotsByName[nameID].SnapshotWasApplied == true)
+                            continue;
+
+                        int RptSeq = msg.GetInt("RptSeq");
+                        string LastFragment = msg.GetString("LastFragment");
+                        //  long LastMsgSeqNumProcessed = msg.GetLong("LastMsgSeqNumProcessed");
+                        long MsgSeqNum = msg.GetLong("MsgSeqNum");
+
+                        SnapshotFragment fragment = new SnapshotFragment();
+                        fragment.MsgSeqNum = MsgSeqNum;
+                        fragment.RptSeq = RptSeq;
+                        fragment.LastFragment = LastFragment == "1" ? true : false;
+                        fragment.SymbolNameID = nameID;
+                        fragment.mdLevel = new List<MarketDepthLevel>();
+
+                        WriteLogOrders($"Получен фрагмент снэпшота по инструменту: {_secNameById[nameID]}, MsgSeqNum: {MsgSeqNum}, Последний: {fragment.LastFragment}, RptSeq: {RptSeq}");
+
+                        if (msg.IsDefined("MDEntries"))
+                        {
+                            SequenceValue secVal = msg.GetValue("MDEntries") as SequenceValue;
+
+                            for (int i = 0; i < secVal.Length; i++)
+                            {
+                                GroupValue groupVal = secVal[i] as GroupValue;
+
+                                MarketDepthLevel level = new MarketDepthLevel();
+
+                                string MDEntryType = groupVal.GetString("MDEntryType");
+                                double price = groupVal.GetString("MDEntryPx").ToDouble();
+                                double volume = groupVal.GetString("MDEntrySize").ToDouble();
+                                long priceLevel = Convert.ToInt64(groupVal.GetString("MDPriceLevel"));
+
+                                switch (MDEntryType)// 0 - котировка на покупку, 1 - котровка на продажу
+                                {
+                                    case "0":
+                                        level.Bid = volume;
+                                        level.Ask = 0;
+                                        break;
+                                    case "1":
+                                        level.Ask = volume;
+                                        level.Bid = 0;
+                                        break;
+                                    case "J": // пустой снэпшот
+                                        SendLogMessage($"The snapshot for depth {nameID} symbol is empty", LogMessageType.System);
+                                        continue;
+                                    default:
+                                        SendLogMessage("Order type ERROR", LogMessageType.Error);
+                                        break;
+                                }
+
+                                level.Price = price;
+                                level.Id = priceLevel;
+
+                                MDEntryType = level.Ask > 0 ? "Ask" : "Bid";
+
+                                fragment.mdLevel.Add(level); // для первичного заполнения стакана
+
+                                WriteLogOrders($"Фрагмент содержит запись {i}: Инструмент: {_secNameById[nameID]}, Уровень стакана: {level.Id}, Тип: {MDEntryType} Цена: {price}, Объем: {volume}");
+                            }
+                        }
+
+                        // добавляем сообщение в снэпшот и проверяем его готовность
+                        if (_ordersSnapshotsByName[nameID].SnapshotFragments == null)
+                        {
+                            _ordersSnapshotsByName[nameID].SnapshotFragments = new List<SnapshotFragment>();
+                            _ordersSnapshotsByName[nameID].SnapshotFragments.Add(fragment);
+                            _ordersSnapshotsByName[nameID].RptSeq = fragment.RptSeq;
+                            _ordersSnapshotsByName[nameID].SymbolNameID = fragment.SymbolNameID;
+                        }
+                        else
+                        {
+                            _ordersSnapshotsByName[nameID].SnapshotFragments.Add(fragment);
+
+                            if (_ordersSnapshotsByName[nameID].SnapshotFragments[0].RptSeq != fragment.RptSeq)
+                            {
+                                _ordersSnapshotsByName[nameID].SnapshotFragments.Clear();
+
+                                WriteLogOrders($"Пришел фрагмент по инструменту {_secNameById[nameID]} с другим RptSeq. Ждем новый цикл.");
+                            }
+                        }
+
+                        //int mdLevelsCount = 0;
+
+                        //for (int i = 0; i < _ordersSnapshotsByName[nameID].SnapshotFragments.Count; i++)
+                        //{
+                        //    mdLevelsCount += _ordersSnapshotsByName[nameID].SnapshotFragments[i].mdLevel.Count;
+                        //}
+
+                        // если снэпшот сформирован
+                        if (fragment.LastFragment)
+                        {
+
+                            if (_waitingDepthChanges[nameID].Count > 0 & _minRptSeqFromOrders.ContainsKey(nameID))
+                            {
+                                if ((_ordersSnapshotsByName[nameID].RptSeq >= _minRptSeqFromOrders[nameID]
+                                     || _ordersSnapshotsByName[nameID].RptSeq == _minRptSeqFromOrders[nameID] - 1)
+                                     & _ordersSnapshotsByName[nameID].RptSeq != 0)
+                                {
+
+                                    WriteLogOrders($"Снэпшот {_secNameById[nameID]} сформирован.");
+
+                                    SendLogMessage($"Снэпшот {_secNameById[nameID]} сформирован.", LogMessageType.System);
+
+                                    // формируем первый стакан из снэпшота
+                                    MarketDepth marketDepth = new MarketDepth();
+
+                                    List<MarketDepthLevel> asks = new List<MarketDepthLevel>();
+                                    List<MarketDepthLevel> bids = new List<MarketDepthLevel>();
+
+                                    for (int i = 0; i < _ordersSnapshotsByName[nameID].SnapshotFragments.Count; i++)
+                                    {
+                                        List<MarketDepthLevel> mdLevels = _ordersSnapshotsByName[nameID].SnapshotFragments[i].mdLevel;
+
+                                        // взять все биды
+                                        var fragBids = mdLevels.FindAll(b => b.Bid > 0);
+
+                                        if (fragBids.Count > 0)
+                                        {
+                                            bids.AddRange(fragBids);
+                                            bids.Sort((x, y) => x.Id.CompareTo(y.Id));
+                                        }
+
+                                        // взять все аски
+                                        var fragAsks = mdLevels.FindAll(b => b.Ask > 0);
+
+                                        if (fragAsks.Count > 0)
+                                        {
+                                            asks.AddRange(fragAsks);
+                                            asks.Sort((x, y) => x.Id.CompareTo(y.Id));
+                                        }
+                                    }
+
+                                    marketDepth.Asks = asks;
+                                    marketDepth.Bids = bids;
+
+                                    marketDepth.SecurityNameCode = _secNameById[nameID];
+                                    marketDepth.Time = DateTime.UtcNow.AddHours(3);
+
+                                    if (bids.Count > 0 || asks.Count > 0)
+                                    {
+                                        _foBook20AggDepths[nameID] = marketDepth; // добавляем первый стакан
+                                    }
+                                    else
+                                    {
+                                        SendLogMessage($"Биды аски из снэпшота {_secNameById[nameID]} пустые.", LogMessageType.Error);
+                                    }
+
+
+                                    WriteLogOrders($"Пытаюсь применить ожидающие заявки по инструменту {_secNameById[nameID]}. RptSec снэпшота: {_ordersSnapshotsByName[nameID].RptSeq} > MinRptSec: {_minRptSeqFromOrders[nameID]}");
+
+                                    string md = "Первый стакан до ожидающих заявок:\n[Уровень]  [Цена]  [Объём]\n";
+
+                                    for (int i = _foBook20AggDepths[nameID].Asks.Count - 1; i >= 0; i--)
+                                    {
+                                        md += $"[ {_foBook20AggDepths[nameID].Asks[i].Id} ] [ {_foBook20AggDepths[nameID].Asks[i].Price} [ {_foBook20AggDepths[nameID].Asks[i].Ask} ]\n";
+                                    }
+
+                                    md += "-----------------------------------------\n";
+
+                                    for (int k = 0; k < _foBook20AggDepths[nameID].Bids.Count; k++)
+                                    {
+                                        md += $"[ {_foBook20AggDepths[nameID].Bids[k].Id} ] [ {_foBook20AggDepths[nameID].Bids[k].Price} [ {_foBook20AggDepths[nameID].Bids[k].Bid} ]\n";
+                                    }
+
+                                    WriteLogOrders(md);
+
+                                    SendLogMessage(md, LogMessageType.System);
+
+                                    // меняем стакан, согласно ожидающих заявок
+                                    for (int j = 0; j < _waitingDepthChanges[nameID].Count; j++)
+                                    {
+                                        if (_waitingDepthChanges[nameID][j].RptSeq <= _ordersSnapshotsByName[nameID].RptSeq)
+                                        {
+                                            continue;
+                                        }
+
+                                        UpdateAggDepth(_foBook20AggDepths[nameID], _waitingDepthChanges[nameID][j], nameID);
+
+                                    }
+
+                                    string md2 = "Первый стакан после ожидающих:\n[Уровень]  [Цена]  [Объём]\n";
+
+                                    for (int i = _foBook20AggDepths[nameID].Asks.Count - 1; i >= 0; i--)
+                                    {
+                                        md2 += $"[ {_foBook20AggDepths[nameID].Asks[i].Id} ] [ {_foBook20AggDepths[nameID].Asks[i].Price} [ {_foBook20AggDepths[nameID].Asks[i].Ask} ]\n";
+                                    }
+
+                                    md2 += "-----------------------------------------\n";
+
+                                    for (int k = 0; k < _foBook20AggDepths[nameID].Bids.Count; k++)
+                                    {
+                                        md2 += $"[ {_foBook20AggDepths[nameID].Bids[k].Id} ] [ {_foBook20AggDepths[nameID].Bids[k].Price} [ {_foBook20AggDepths[nameID].Bids[k].Bid} ]\n";
+                                    }
+
+                                    WriteLogOrders(md2);
+
+                                    // отправили первый стакан
+                                    MarketDepthEvent(_foBook20AggDepths[nameID]);
+
+                                    WriteLogOrders($"Первый стакан по инструменту {_secNameById[nameID]} отправлен.");
+
+                                    _ordersSnapshotsByName[nameID].SnapshotWasApplied = true;
+
+                                    // чистим фрагменты снэпшота и ожидающие ордера
+                                    _ordersSnapshotsByName[nameID].SnapshotFragments.Clear();
+                                    _waitingDepthChanges[nameID].Clear();
+
+                                    _mdTimeStart = DateTime.Now;
+                                }
+                                else
+                                {
+                                    SendLogMessage("The market depth levels are not yet correct.Wait for a new snapshot", LogMessageType.Error);
+
+                                    _ordersSnapshotsByName[nameID].SnapshotFragments.Clear();
+                                    _ordersSnapshotsByName[nameID].SnapshotFragments = null;
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                string md = "Первый стакан без ожидающих:\n[Уровень]  [Цена]  [Объём]\n";
+
+                                for (int i = _foBook20AggDepths[nameID].Asks.Count - 1; i >= 0; i--)
+                                {
+                                    md += $"[ {_foBook20AggDepths[nameID].Asks[i].Id} ] [ {_foBook20AggDepths[nameID].Asks[i].Price} [ {_foBook20AggDepths[nameID].Asks[i].Ask} ]\n";
+                                }
+
+                                md += "-----------------------------------------\n";
+
+                                for (int k = 0; k < _foBook20AggDepths[nameID].Bids.Count; k++)
+                                {
+                                    md += $"[ {_foBook20AggDepths[nameID].Bids[k].Id} ] [ {_foBook20AggDepths[nameID].Bids[k].Price} [ {_foBook20AggDepths[nameID].Bids[k].Bid} ]\n";
+                                }
+
+                                WriteLogOrders(md);
+
+
+
+                                // отправили первый стакан
+                                MarketDepthEvent(_foBook20AggDepths[nameID]);
+
+                                WriteLogOrders($"Первый стакан по инструменту {_secNameById[nameID]} отправлен.");
+
+
+                                // если нет ожидающих заявок из инкрементов, считаем снэпшот примененым
+                                _ordersSnapshotsByName[nameID].SnapshotWasApplied = true;
+                                WriteLogOrders($"Ожидающих заявок нет.Снэпшот по инструменту {_secNameById[nameID]} применен");
+                            }
+
+                            WriteLogOrders($"Снэпшот по инструменту {_secNameById[nameID]} применен");
+
+                            if (!IsNeedSnapshotSockets(_ordersSnapshotsByName) && _foBook20SnapshotSocketA != null)
+                            {
+                                lock (_socketLockerOrdersSnapshots)
+                                {
+                                    _socketsFoBook20.Remove(_foBook20SnapshotSocketA);
+                                    _socketsFoBook20.Remove(_foBook20SnapshotSocketB);
+
+                                    try
+                                    {
+                                        _foBook20SnapshotSocketA.Close();
+                                    }
+                                    catch
+                                    {
+                                        // ignore
+                                    }
+
+                                    try
+                                    {
+                                        _foBook20SnapshotSocketB.Close();
+                                    }
+                                    catch
+                                    {
+                                        // ignore
+                                    }
+
+                                    _foBook20SnapshotSocketA = null;
+                                    _foBook20SnapshotSocketB = null;
+                                }
+                                WriteLogOrders("Сокеты снэпшотов FO-BOOK закрыты");
+
+                                _foBook20SnapshotsMsgs.Clear();
+                            }
+                        }
+                        else
+                        {
+                            WriteLogOrders($"Снэпшот по инструменту: {_secNameById[nameID]} не сформирован. Ждем");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    SendLogMessage(ex.ToString(), LogMessageType.Error);
+                    Thread.Sleep(5000);
+                }
+            }
+        }
+
+        private void UpdateAggDepth(MarketDepth depth, OrderChange levelChange, string nameID)
+        {
+            if ((levelChange.OrderType == OrderType.Ask && depth.Asks.Count == 0) || (levelChange.OrderType == OrderType.Bid && depth.Bids.Count == 0))
+            {
+                SendLogMessage($"Плохой стакан: {depth.Bids.Count} бидов и {depth.Asks.Count} асков", LogMessageType.Error);
+                return;
+            }
+
+
+
+            WriteLogOrders($"Пришло изменение стакана: Уровень: {levelChange.PriceLevel}, Действие: {levelChange.Action}, Тип: {levelChange.OrderType} Цена: {levelChange.Price}, Объем: {levelChange.Volume}");
+
+            WriteLogOrders(MDPrint(nameID));
+
+            if (levelChange.OrderType == OrderType.Ask)
+            {
+                MarketDepthLevel lvlAsk = depth.Asks.Find(p => p.Id == levelChange.PriceLevel && p.Ask > 0);
+
+
+                switch (levelChange.Action)
+                {
+                    case OrderAction.Add:
+
+                        if (lvlAsk == null)
+                        {
+                            depth.Asks.Add(new MarketDepthLevel() { Id = levelChange.PriceLevel, Price = levelChange.Price, Ask = levelChange.Volume });
+                            return;
+                        }
+                        else
+                        {
+                            int index = depth.Asks.IndexOf(lvlAsk);
+
+                            for (int i = index; i < depth.Asks.Count; i++)
+                            {
+                                depth.Asks[i].Id++;
+                            }
+
+                            depth.Asks.Insert(levelChange.PriceLevel - 1, new MarketDepthLevel() { Id = levelChange.PriceLevel, Price = levelChange.Price, Ask = levelChange.Volume });
+
+                            if (depth.Asks[^1].Id == 21)
+                                depth.Asks.RemoveAt(20);
+
+                        }
+
+                        break;
+
+                    case OrderAction.Change:
+
+                        if (lvlAsk == null)
+                        {
+                            SendLogMessage($"В стакане не найден уровень {levelChange.PriceLevel} для АСК {levelChange.Action} ", LogMessageType.Error);
+                            return;
+                        }
+
+                        lvlAsk.Price = levelChange.Price;
+                        lvlAsk.Ask = levelChange.Volume;
+
+                        break;
+
+                    case OrderAction.Delete:
+
+                        if (lvlAsk == null)
+                        {
+                            SendLogMessage($"В стакане не найден уровень {levelChange.PriceLevel} для АСК {levelChange.Action} ", LogMessageType.Error);
+                            return;
+                        }
+                        else
+                        {
+                            int index = depth.Asks.IndexOf(lvlAsk);
+
+                            for (int i = index + 1; i < depth.Asks.Count; i++)
+                            {
+                                depth.Asks[i].Id--;
+                            }
+
+                            depth.Asks.Remove(lvlAsk);
+
+                        }
+
+
+                        break;
+                    case OrderAction.None:
+                        break;
+                    default:
+                        break;
+                }
+
+            }
+            else if (levelChange.OrderType == OrderType.Bid)
+            {
+                MarketDepthLevel lvlBid = depth.Bids.Find(p => p.Id == levelChange.PriceLevel && p.Bid > 0);
+
+                switch (levelChange.Action)
+                {
+                    case OrderAction.Add:
+
+                        if (lvlBid == null)
+                        {
+                            depth.Bids.Add(new MarketDepthLevel() { Id = levelChange.PriceLevel, Price = levelChange.Price, Bid = levelChange.Volume });
+                        }
+                        else
+                        {
+                            int index = depth.Bids.IndexOf(lvlBid);
+
+                            for (int i = index; i < depth.Bids.Count; i++)
+                            {
+                                depth.Bids[i].Id++;
+                            }
+
+                            depth.Bids.Insert(levelChange.PriceLevel - 1, new MarketDepthLevel() { Id = levelChange.PriceLevel, Price = levelChange.Price, Bid = levelChange.Volume });
+
+                            if (depth.Bids[^1].Id == 21)
+                                depth.Bids.RemoveAt(20);
+                        }
+
+                        break;
+
+                    case OrderAction.Change:
+
+                        if (lvlBid == null)
+                        {
+                            SendLogMessage($"В стакане не найден уровень {levelChange.PriceLevel} для БИД {levelChange.Action} ", LogMessageType.Error);
+                            return;
+                        }
+
+                        lvlBid.Price = levelChange.Price;
+                        lvlBid.Bid = levelChange.Volume;
+
+                        break;
+                    case OrderAction.Delete:
+
+                        if (lvlBid == null)
+                        {
+                            SendLogMessage($"В стакане не найден уровень {levelChange.PriceLevel} для БИД {levelChange.Action} ", LogMessageType.Error);
+                            return;
+                        }
+                        else
+                        {
+                            int index = depth.Bids.IndexOf(lvlBid);
+
+                            for (int i = index + 1; i < depth.Bids.Count; i++)
+                            {
+                                depth.Bids[i].Id--;
+                            }
+
+                            depth.Bids.Remove(lvlBid);
+
+                        }
+
+
+                        break;
+                    case OrderAction.None:
+                        break;
+                    default:
+                        break;
+                }
+
+            }
+        }
+
+        private string MDPrint(string nameID)
+        {
+            string md2 = "Стакан:\n[Уровень]  [Цена]  [Объём]\n";
+
+            for (int i = _foBook20AggDepths[nameID].Asks.Count - 1; i >= 0; i--)
+            {
+                md2 += $"[ {_foBook20AggDepths[nameID].Asks[i].Id} ] [ {_foBook20AggDepths[nameID].Asks[i].Price} [ {_foBook20AggDepths[nameID].Asks[i].Ask} ]\n";
+            }
+
+            md2 += "-----------------------------------------\n";
+
+            for (int k = 0; k < _foBook20AggDepths[nameID].Bids.Count; k++)
+            {
+                md2 += $"[ {_foBook20AggDepths[nameID].Bids[k].Id} ] [ {_foBook20AggDepths[nameID].Bids[k].Price} [ {_foBook20AggDepths[nameID].Bids[k].Bid} ]\n";
+            }
+
+            return md2;
+        }
+
+        #endregion
+    }
+
+
+
+    public enum TradeSessionStatus
+    {
+        Open,
+        Close,
+        DayBreak,
+        NigthBreak
     }
 }
