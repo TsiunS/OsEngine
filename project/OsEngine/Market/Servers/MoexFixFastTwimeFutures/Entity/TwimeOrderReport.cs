@@ -38,7 +38,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
             _msgBytes = msgBytes;
         }
 
-        public string ParseError { get; set; } = "Parse error:";
+        public string ParseError { get; set; } = "Parse error: ";
 
         public Order GetOrderReport()
         {
@@ -138,7 +138,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
                     TradingSessionID = BitConverter.ToInt32(_msgBytes, 72);
                     ClOrdLinkID = BitConverter.ToInt32(_msgBytes, 76);
                     _side = _msgBytes[80];
-                    ComplianceID = BitConverter.ToChar(_msgBytes, 81);
+                    ComplianceID = (char)_msgBytes[81]; 
                 }
                 else if (_messageID == 7016)
                 {
@@ -155,7 +155,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
                     TradingSessionID = BitConverter.ToInt32(_msgBytes, 84);
                     ClOrdLinkID = BitConverter.ToInt32(_msgBytes, 88);
                     _side = _msgBytes[92];
-                    ComplianceID = BitConverter.ToChar(_msgBytes, 93);
+                    ComplianceID = (char)_msgBytes[93];
                 }
                 else if (_messageID == 7017)
                 {
@@ -176,7 +176,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
                     OrderQty = BitConverter.ToUInt32(_msgBytes, 64);
                     TradingSessionID = BitConverter.ToInt32(_msgBytes, 68);
                     ClOrdLinkID = BitConverter.ToInt32(_msgBytes, 72);
-                    ComplianceID = BitConverter.ToChar(_msgBytes, 76);
+                    ComplianceID = (char)_msgBytes[76];
                 }
                 else if (_messageID == 7019)
                 {
@@ -196,7 +196,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures.Entity
                 {
                     parseError = true;
 
-                    ParseError = $"MessageID={_messageID}, ClOrdId={ClOrdId}";
+                    ParseError += $"MessageID={_messageID}, ClOrdId={ClOrdId}";
                 }
             }
             catch (Exception ex)

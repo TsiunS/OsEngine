@@ -772,8 +772,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
         private Socket _foBook20SnapshotSocketB;
         List<Socket> _socketsFoBook20 = new List<Socket>();
 
-        DateTime _mdTimeStart = DateTime.Now;
-
 
         #endregion
 
@@ -1735,8 +1733,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                     {
                                         _tradesIncremental.Remove(i);
                                     }
-
-                                    SendLogMessage($"FAST сообщений трейдов: {_tradesIncremental.Count}", LogMessageType.System);
                                 }
                             }
 
@@ -1770,14 +1766,10 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                         DepthCleaning();
                                     }
 
-
-
                                     if (DateTime.Now.TimeOfDay >= _nigthBreakTime)
                                     {
                                         SendLogMessage("Ночной перерыв", LogMessageType.System);
                                     }
-
-
                                 }
                                 else if ((msg.GetString("TradSesStatus") == "2")) // сессия открыта
                                 {
@@ -1811,7 +1803,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                     if (DateTime.Now.TimeOfDay >= _nigthBreakTime)
                                     {
                                         SendLogMessage("Ночной перерыв", LogMessageType.System);
-
 
                                     }
 
@@ -2030,12 +2021,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                 }
             }
         }
-
-
-
-
-
-
 
 
         Dictionary<long, OpenFAST.Message> _ordersIncremental = new Dictionary<long, OpenFAST.Message>();
@@ -2807,7 +2792,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                 }
                 else
                 {
-
                     controlDepth.BidsF[i].ImmutabilityTime = DateTime.Now;
 
                     controlDepth.BidsF[i].Bid = sourceDepth.Bids[i].Bid;
@@ -3269,7 +3253,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                     }
                     else
                     {
-                        SendLogMessage($"The receipt of the order report failed with an error\n{ordReport.ParseError}", LogMessageType.Error);
+                        SendLogMessage($"The receipt of the new order report failed with an error\n{ordReport.ParseError}", LogMessageType.Error);
                     }
 
                     break;
@@ -3317,7 +3301,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                     }
                     else
                     {
-                        SendLogMessage("The receipt of the order report failed with an error", LogMessageType.Error);
+                        SendLogMessage($"The receipt of the cancel order report failed with an error\n{ordCancReport.ParseError}", LogMessageType.Error);
                     }
                     break;
 
@@ -3358,7 +3342,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                     }
                     else
                     {
-                        SendLogMessage("The receipt of the order report failed with an error", LogMessageType.Error);
+                        SendLogMessage($"The receipt of the order replace report failed with an error\n{ordReplReport.ParseError}", LogMessageType.Error);
                     }
 
                     break;
@@ -3426,7 +3410,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                     }
                     else
                     {
-                        SendLogMessage("The receipt of the execution order report failed with an error", LogMessageType.Error);
+                        SendLogMessage($"The receipt of the execution order report failed with an error\n{ordExecReport.ParseError}", LogMessageType.Error);
                     }
                     break;
 
@@ -4052,12 +4036,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                             Thread.Sleep(300);
                             return;
-
-                            //if (ServerStatus != ServerConnectStatus.Disconnect)
-                            //{
-                            //    ServerStatus = ServerConnectStatus.Disconnect;
-                            //    DisconnectEvent();
-                            //}
+                
                         }
 
                         while (length < 4)
@@ -4073,11 +4052,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                 Thread.Sleep(300);
                                 return;
 
-                                //if (ServerStatus != ServerConnectStatus.Disconnect)
-                                //{
-                                //    ServerStatus = ServerConnectStatus.Disconnect;
-                                //    DisconnectEvent();
-                                //}
                             }
                         }
 
@@ -4098,12 +4072,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                                 Thread.Sleep(300);
                                 return;
-
-                                //if (ServerStatus != ServerConnectStatus.Disconnect)
-                                //{
-                                //    ServerStatus = ServerConnectStatus.Disconnect;
-                                //    DisconnectEvent();
-                                //}
+                          
                             }
 
                             Array.Copy(buffer, 0, messageBuffer, totalBytesReceived, bytesRead);
@@ -4169,11 +4138,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                 Thread.Sleep(300);
                                 return;
 
-                                //if (ServerStatus != ServerConnectStatus.Disconnect)
-                                //{
-                                //    ServerStatus = ServerConnectStatus.Disconnect;
-                                //    DisconnectEvent();
-                                //}
                             }
 
                             while (length < 4)
@@ -4188,12 +4152,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                                     Thread.Sleep(300);
                                     return;
-
-                                    //if (ServerStatus != ServerConnectStatus.Disconnect)
-                                    //{
-                                    //    ServerStatus = ServerConnectStatus.Disconnect;
-                                    //    DisconnectEvent();
-                                    //}
+                           
                                 }
                             }
 
@@ -4215,12 +4174,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                                     Thread.Sleep(300);
                                     return;
-
-                                    //if (ServerStatus != ServerConnectStatus.Disconnect)
-                                    //{
-                                    //    ServerStatus = ServerConnectStatus.Disconnect;
-                                    //    DisconnectEvent();
-                                    //}
+                                   
                                 }
 
                                 Array.Copy(buffer, 0, messageBuffer, totalBytesReceived, bytesRead);
@@ -5166,8 +5120,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                     {
                                         _foBook20IncrementalMsgs.Remove(i);
                                     }
-
-                                    SendLogMessage($"FAST сообщений fo-book: {_foBook20IncrementalMsgs.Count}", LogMessageType.System);
                                 }
                             }
 
@@ -5286,45 +5238,8 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                         if (newOrderChange.RptSeq <= _ordersSnapshotsByName[nameID].RptSeq)
                                             continue;
 
-
-                                        // экспериментальное обнуление стакана и перезапуск
-
-                                        //if (_mdTimeStart.AddMinutes(5) < DateTime.Now)
-                                        //{
-                                        //    SendLogMessage("Обнуляем стакан", LogMessageType.Error);
-
-                                        //    _foBook20AggDepths[nameID].Asks.Clear();
-
-                                        //    _foBook20AggDepths[nameID].Bids.Clear();
-
-                                        //    for (int j = 0; j < 20; j++)
-                                        //    {
-                                        //        _foBook20AggDepths[nameID].Asks.Add(new MarketDepthLevel() { Id = j + 1, Price = 1, Ask = 1 });
-
-                                        //        _foBook20AggDepths[nameID].Bids.Add(new MarketDepthLevel() { Id = j + 1, Price = 1, Bid = 1 });
-                                        //    }
-
-                                        //    _foBook20AggDepths[nameID].Time = DateTime.Now;
-
-                                        //    // снова ждём снэпшот, чистим фрагменты снэпшота и ожидающие ордера
-
-                                        //    if (_foBook20SnapshotSocketA == null && _foBook20SnapshotSocketB == null)
-                                        //        CreateSocketConnections("Top 20 price levels", "Snapshot");
-
-                                        //    _ordersSnapshotsByName[nameID].SnapshotFragments.Clear();
-                                        //    _waitingDepthChanges[nameID].Clear();
-
-                                        //    _ordersSnapshotsByName[nameID].SnapshotWasApplied = false;
-
-                                        //    _mdTimeStart = DateTime.Now.AddMinutes(6);
-
-                                        //    MDPrint(nameID);
-                                        //}
-                                        //else
-                                        //{
                                         UpdateAggDepth(_foBook20AggDepths[nameID], newOrderChange, nameID);
-                                        // }
-
+                                
                                         MarketDepthEvent(_foBook20AggDepths[nameID]);
 
                                         WriteLogOrders($"Изменение ценового уровня. СТАКАН ОБНОВЛЕН: MsgSeqNum: {msgSeqNum}, " +
@@ -5348,7 +5263,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
 
                         int RptSeq = msg.GetInt("RptSeq");
                         string LastFragment = msg.GetString("LastFragment");
-                        //  long LastMsgSeqNumProcessed = msg.GetLong("LastMsgSeqNumProcessed");
                         long MsgSeqNum = msg.GetLong("MsgSeqNum");
 
                         SnapshotFragment fragment = new SnapshotFragment();
@@ -5423,14 +5337,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                 WriteLogOrders($"Пришел фрагмент по инструменту {_secNameById[nameID]} с другим RptSeq. Ждем новый цикл.");
                             }
                         }
-
-                        //int mdLevelsCount = 0;
-
-                        //for (int i = 0; i < _ordersSnapshotsByName[nameID].SnapshotFragments.Count; i++)
-                        //{
-                        //    mdLevelsCount += _ordersSnapshotsByName[nameID].SnapshotFragments[i].mdLevel.Count;
-                        //}
-
+                     
                         // если снэпшот сформирован
                         if (fragment.LastFragment)
                         {
@@ -5490,26 +5397,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                         SendLogMessage($"Биды аски из снэпшота {_secNameById[nameID]} пустые.", LogMessageType.Error);
                                     }
 
-
                                     WriteLogOrders($"Пытаюсь применить ожидающие заявки по инструменту {_secNameById[nameID]}. RptSec снэпшота: {_ordersSnapshotsByName[nameID].RptSeq} > MinRptSec: {_minRptSeqFromOrders[nameID]}");
-
-                                    string md = "Первый стакан до ожидающих заявок:\n[Уровень]  [Цена]  [Объём]\n";
-
-                                    for (int i = _foBook20AggDepths[nameID].Asks.Count - 1; i >= 0; i--)
-                                    {
-                                        md += $"[ {_foBook20AggDepths[nameID].Asks[i].Id} ] [ {_foBook20AggDepths[nameID].Asks[i].Price} [ {_foBook20AggDepths[nameID].Asks[i].Ask} ]\n";
-                                    }
-
-                                    md += "-----------------------------------------\n";
-
-                                    for (int k = 0; k < _foBook20AggDepths[nameID].Bids.Count; k++)
-                                    {
-                                        md += $"[ {_foBook20AggDepths[nameID].Bids[k].Id} ] [ {_foBook20AggDepths[nameID].Bids[k].Price} [ {_foBook20AggDepths[nameID].Bids[k].Bid} ]\n";
-                                    }
-
-                                    WriteLogOrders(md);
-
-                                    SendLogMessage(md, LogMessageType.System);
 
                                     // меняем стакан, согласно ожидающих заявок
                                     for (int j = 0; j < _waitingDepthChanges[nameID].Count; j++)
@@ -5520,25 +5408,8 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                         }
 
                                         UpdateAggDepth(_foBook20AggDepths[nameID], _waitingDepthChanges[nameID][j], nameID);
-
                                     }
-
-                                    string md2 = "Первый стакан после ожидающих:\n[Уровень]  [Цена]  [Объём]\n";
-
-                                    for (int i = _foBook20AggDepths[nameID].Asks.Count - 1; i >= 0; i--)
-                                    {
-                                        md2 += $"[ {_foBook20AggDepths[nameID].Asks[i].Id} ] [ {_foBook20AggDepths[nameID].Asks[i].Price} [ {_foBook20AggDepths[nameID].Asks[i].Ask} ]\n";
-                                    }
-
-                                    md2 += "-----------------------------------------\n";
-
-                                    for (int k = 0; k < _foBook20AggDepths[nameID].Bids.Count; k++)
-                                    {
-                                        md2 += $"[ {_foBook20AggDepths[nameID].Bids[k].Id} ] [ {_foBook20AggDepths[nameID].Bids[k].Price} [ {_foBook20AggDepths[nameID].Bids[k].Bid} ]\n";
-                                    }
-
-                                    WriteLogOrders(md2);
-
+                                  
                                     // отправили первый стакан
                                     MarketDepthEvent(_foBook20AggDepths[nameID]);
 
@@ -5549,8 +5420,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                                     // чистим фрагменты снэпшота и ожидающие ордера
                                     _ordersSnapshotsByName[nameID].SnapshotFragments.Clear();
                                     _waitingDepthChanges[nameID].Clear();
-
-                                    _mdTimeStart = DateTime.Now;
+                                                                       
                                 }
                                 else
                                 {
@@ -5563,25 +5433,7 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                             }
                             else
                             {
-                                string md = "Первый стакан без ожидающих:\n[Уровень]  [Цена]  [Объём]\n";
-
-                                for (int i = _foBook20AggDepths[nameID].Asks.Count - 1; i >= 0; i--)
-                                {
-                                    md += $"[ {_foBook20AggDepths[nameID].Asks[i].Id} ] [ {_foBook20AggDepths[nameID].Asks[i].Price} [ {_foBook20AggDepths[nameID].Asks[i].Ask} ]\n";
-                                }
-
-                                md += "-----------------------------------------\n";
-
-                                for (int k = 0; k < _foBook20AggDepths[nameID].Bids.Count; k++)
-                                {
-                                    md += $"[ {_foBook20AggDepths[nameID].Bids[k].Id} ] [ {_foBook20AggDepths[nameID].Bids[k].Price} [ {_foBook20AggDepths[nameID].Bids[k].Bid} ]\n";
-                                }
-
-                                WriteLogOrders(md);
-
-
-
-                                // отправили первый стакан
+                                     // отправили первый стакан
                                 MarketDepthEvent(_foBook20AggDepths[nameID]);
 
                                 WriteLogOrders($"Первый стакан по инструменту {_secNameById[nameID]} отправлен.");
@@ -5648,12 +5500,6 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
                 SendLogMessage($"Плохой стакан: {depth.Bids.Count} бидов и {depth.Asks.Count} асков", LogMessageType.Error);
                 return;
             }
-
-
-
-            WriteLogOrders($"Пришло изменение стакана: Уровень: {levelChange.PriceLevel}, Действие: {levelChange.Action}, Тип: {levelChange.OrderType} Цена: {levelChange.Price}, Объем: {levelChange.Volume}");
-
-            WriteLogOrders(MDPrint(nameID));
 
             if (levelChange.OrderType == OrderType.Ask)
             {
@@ -5801,28 +5647,9 @@ namespace OsEngine.Market.Servers.MoexFixFastTwimeFutures
             }
         }
 
-        private string MDPrint(string nameID)
-        {
-            string md2 = "Стакан:\n[Уровень]  [Цена]  [Объём]\n";
-
-            for (int i = _foBook20AggDepths[nameID].Asks.Count - 1; i >= 0; i--)
-            {
-                md2 += $"[ {_foBook20AggDepths[nameID].Asks[i].Id} ] [ {_foBook20AggDepths[nameID].Asks[i].Price} [ {_foBook20AggDepths[nameID].Asks[i].Ask} ]\n";
-            }
-
-            md2 += "-----------------------------------------\n";
-
-            for (int k = 0; k < _foBook20AggDepths[nameID].Bids.Count; k++)
-            {
-                md2 += $"[ {_foBook20AggDepths[nameID].Bids[k].Id} ] [ {_foBook20AggDepths[nameID].Bids[k].Price} [ {_foBook20AggDepths[nameID].Bids[k].Bid} ]\n";
-            }
-
-            return md2;
-        }
-
+       
         #endregion
     }
-
 
 
     public enum TradeSessionStatus
