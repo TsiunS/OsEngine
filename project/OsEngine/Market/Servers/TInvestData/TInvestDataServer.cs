@@ -503,7 +503,7 @@ namespace OsEngine.Market.Servers.TInvestData
        
                 }
 
-                return allCandles;
+                return ConvertCandlesToRequestedTimeFrame(allCandles, timeFrameBuilder);
             }
             catch (Exception ex)
             {
@@ -565,6 +565,130 @@ namespace OsEngine.Market.Servers.TInvestData
             }
  
             return candles;
+        }
+
+        private List<Candle> ConvertCandlesToRequestedTimeFrame(List<Candle> allCandles, TimeFrameBuilder timeFrameBuilder)
+        {
+            if (allCandles == null || allCandles.Count == 0 || timeFrameBuilder == null)
+            {
+                return allCandles;
+            }
+
+            int tfMinutes = GetTimeFrameMinutes(timeFrameBuilder.TimeFrame);
+
+            if (tfMinutes <= 1)
+            {
+                return allCandles;
+            }
+
+            allCandles.Sort((a, b) => a.TimeStart.CompareTo(b.TimeStart));
+
+            List<Candle> resultCandles = new List<Candle>();
+
+            Candle currentCandle = null;
+            DateTime currentBucketStart = DateTime.MinValue;
+
+            for (int i = 0; i < allCandles.Count; i++)
+            {
+                Candle minuteCandle = allCandles[i];
+                DateTime bucketStart = GetBucketStartTime(minuteCandle.TimeStart, tfMinutes);
+
+                if (currentCandle == null || bucketStart != currentBucketStart)
+                {
+                    if (currentCandle != null)
+                    {
+                        resultCandles.Add(currentCandle);
+                    }
+
+                    currentBucketStart = bucketStart;
+                    currentCandle = new Candle();
+                    currentCandle.TimeStart = bucketStart;
+                    currentCandle.Open = minuteCandle.Open;
+                    currentCandle.High = minuteCandle.High;
+                    currentCandle.Low = minuteCandle.Low;
+                    currentCandle.Close = minuteCandle.Close;
+                    currentCandle.Volume = minuteCandle.Volume;
+                    currentCandle.State = CandleState.Finished;
+                }
+                else
+                {
+                    if (minuteCandle.High > currentCandle.High)
+                    {
+                        currentCandle.High = minuteCandle.High;
+                    }
+
+                    if (minuteCandle.Low < currentCandle.Low)
+                    {
+                        currentCandle.Low = minuteCandle.Low;
+                    }
+
+                    currentCandle.Close = minuteCandle.Close;
+                    currentCandle.Volume += minuteCandle.Volume;
+                }
+            }
+
+            if (currentCandle != null)
+            {
+                resultCandles.Add(currentCandle);
+            }
+
+            return resultCandles;
+        }
+
+        private int GetTimeFrameMinutes(TimeFrame timeFrame)
+        {
+            if (timeFrame == TimeFrame.Min1)
+            {
+                return 1;
+            }
+            if (timeFrame == TimeFrame.Min2)
+            {
+                return 2;
+            }
+            if (timeFrame == TimeFrame.Min5)
+            {
+                return 5;
+            }
+            if (timeFrame == TimeFrame.Min15)
+            {
+                return 15;
+            }
+            if (timeFrame == TimeFrame.Min30)
+            {
+                return 30;
+            }
+            if (timeFrame == TimeFrame.Hour1)
+            {
+                return 60;
+            }
+            if (timeFrame == TimeFrame.Hour2)
+            {
+                return 120;
+            }
+            if (timeFrame == TimeFrame.Hour4)
+            {
+                return 240;
+            }
+            if (timeFrame == TimeFrame.Day)
+            {
+                return 1440;
+            }
+
+            return 1;
+        }
+
+        private DateTime GetBucketStartTime(DateTime sourceTime, int tfMinutes)
+        {
+            if (tfMinutes >= 1440)
+            {
+                return sourceTime.Date;
+            }
+
+            DateTime dayStart = sourceTime.Date;
+            int minuteFromDayStart = sourceTime.Hour * 60 + sourceTime.Minute;
+            int roundedMinute = minuteFromDayStart - minuteFromDayStart % tfMinutes;
+
+            return dayStart.AddMinutes(roundedMinute);
         }
 
         public List<Trade> GetTickDataToSecurity(Security security, DateTime startTime, DateTime endTime, DateTime actualTime)
@@ -1064,4 +1188,3 @@ namespace OsEngine.Market.Servers.TInvestData
       
     }
 }
-
