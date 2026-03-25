@@ -1064,6 +1064,7 @@ namespace OsEngine
         #region Updater
         private async void GetUpdateInfo()
         {
+            return;
             try
             {
                 DateTime insideVersionDate = File.GetLastWriteTimeUtc(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "OsEngine.exe"));

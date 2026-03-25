@@ -3,10 +3,6 @@
  *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
 
-/*
- *Your rights to use the code are governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
- *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
-*/
 
 using System;
 using System.Collections.Generic;
@@ -90,6 +86,7 @@ using OsEngine.Market.Servers.GateIoData;
 using OsEngine.Market.Servers.BitGetData;
 using OsEngine.Market.Servers.MetaTrader5;
 using OsEngine.Market.Servers.QscalpMarketDepth;
+using OsEngine.Market.Servers.TInvestData;
 
 namespace OsEngine.Market
 {
@@ -482,6 +479,7 @@ namespace OsEngine.Market
                 serverTypes.Add(ServerType.BitGetData);
                 serverTypes.Add(ServerType.MetaTrader5);
                 serverTypes.Add(ServerType.QscalpMarketDepth);
+                serverTypes.Add(ServerType.TInvestData);
 
                 return serverTypes;
             }
@@ -618,6 +616,10 @@ namespace OsEngine.Market
 
                     SaveMostPopularServers(type);
 
+                    if (type == ServerType.TInvestData)
+                    {
+                        newServer = new TInvestDataServer();
+                    }
                     if (type == ServerType.QscalpMarketDepth)
                     {
                         newServer = new QscalpMarketDepthServer();
@@ -1670,6 +1672,10 @@ namespace OsEngine.Market
                 {
                     serverPermission = new QscalpMarketDepthServerPermission();
                 }
+                else if (type == ServerType.TInvestData)
+                {
+                    serverPermission = new TInvestDataServerPermission();
+                }
 
                 if (serverPermission != null)
                 {
@@ -2478,6 +2484,12 @@ namespace OsEngine.Market
         /// downloading historical depths
         /// скачивание историческихстаканов в формате qsh
         /// </summary>
-        QscalpMarketDepth
+        QscalpMarketDepth,
+
+        /// <summary>
+        /// downloading historical data from T-Invest archives
+        /// скачивание исторических данных из архивов T-Invest
+        /// </summary>
+        TInvestData,
     }
 }
